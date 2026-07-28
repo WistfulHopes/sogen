@@ -1584,6 +1584,44 @@ namespace sogen
         PS_ATTRIBUTE<Traits> Attributes[1];
     };
 
+    enum PS_CREATE_STATE : uint32_t
+    {
+        PsCreateInitialState = 0,
+        PsCreateFailOnFileOpen = 1,
+        PsCreateFailOnSectionCreate = 2,
+        PsCreateFailExeFormat = 3,
+        PsCreateFailMachineMismatch = 4,
+        PsCreateFailExeName = 5,
+        PsCreateSuccess = 6,
+    };
+
+    template <typename Traits>
+    struct PS_CREATE_INFO
+    {
+        Traits::SIZE_T Size;
+        uint32_t State;
+        uint32_t Padding;
+
+        struct
+        {
+            uint32_t OutputFlags;
+            uint32_t Padding2;
+            Traits::ULONG_PTR FileHandle;
+            Traits::ULONG_PTR SectionHandle;
+            uint64_t UserProcessParametersNative;
+            uint32_t UserProcessParametersWow64;
+            uint32_t CurrentParameterFlags;
+            uint64_t PebAddressNative;
+            uint32_t PebAddressWow64;
+            uint32_t Padding3;
+            uint64_t ManifestAddress;
+            uint32_t ManifestSize;
+            uint32_t Padding4;
+        } SuccessState;
+    };
+
+    static_assert(sizeof(PS_CREATE_INFO<EmulatorTraits<Emu64>>) == 0x58);
+
     typedef struct _SYSTEM_TIMEOFDAY_INFORMATION64
     {
         LARGE_INTEGER BootTime;
