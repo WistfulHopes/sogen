@@ -643,6 +643,79 @@ namespace sogen
                 }
             }
 
+            // Once the child has been spinning a while, dump every section's backing store.
+            // If the child WROTE a request into the shared section before waiting, the
+            // handshake is child-first and the parent only has to answer it; if it is still
+            // all zeros, the child is purely a consumer and the parent must speak first.
+            {
+                // SWEEP: the child posts [0x00]=2, [0x40]=5 into the shared section and then
+                // spins. Act as the parent by writing candidate replies into [0x00] and
+                // watching for the spin to break (the yield counter stops climbing and new
+                // syscalls appear). Same empirical approach that settled the EAC UNK1 value.
+                static uint64_t sweep_count = 0;
+                static uint8_t candidate = 3;
+                if (++sweep_count > 60000 && (sweep_count % 20000) == 0 && candidate < 16)
+                {
+                    for (auto& [sec_handle, sec] : c.proc.sections)
+                    {
+                        if (!sec.backing_address)
+                        {
+                            continue;
+                        }
+                        c.emu.write_memory<uint8_t>(sec.backing_address, candidate);
+                        c.win_emu.log.print(color::cyan, "[SWEEP] wrote [0x00]=%u into section 0x%" PRIx64 "\n", candidate,
+                                            static_cast<uint64_t>(sec_handle));
+                    }
+                    ++candidate;
+                }
+
+                static uint64_t yield_count = 0;
+                if (++yield_count == 50000)
+                {
+                    int idx = 0;
+                    for (auto& [sec_handle, sec] : c.proc.sections)
+                    {
+                        if (!sec.backing_address)
+                        {
+                            continue;
+                        }
+                        const auto size = static_cast<size_t>(std::min<uint64_t>(sec.maximum_size, 0x100000));
+                        std::vector<uint8_t> buf(size);
+                        try
+                        {
+                            c.emu.read_memory(sec.backing_address, buf.data(), size);
+                        }
+                        catch (...)
+                        {
+                            continue;
+                        }
+                        size_t nonzero = 0, first = SIZE_MAX;
+                        for (size_t i = 0; i < size; ++i)
+                        {
+                            if (buf[i])
+                            {
+                                ++nonzero;
+                                if (first == SIZE_MAX)
+                                {
+                                    first = i;
+                                }
+                            }
+                        }
+                        char path[256];
+                        sprintf(path, "C:\\dev\\tokon\\dumps\\child_section_%d.bin", idx++);
+                        if (FILE* f = fopen(path, "wb"))
+                        {
+                            fwrite(buf.data(), 1, size, f);
+                            fclose(f);
+                        }
+                        c.win_emu.log.print(color::green,
+                                            "[CHILDSEC] after 50k yields: handle=0x%" PRIx64 " size=%zu nonzero=%zu firstNonZero=%zd -> %s\n",
+                                            static_cast<uint64_t>(sec_handle), size, nonzero,
+                                            first == SIZE_MAX ? -1 : static_cast<ptrdiff_t>(first), path);
+                    }
+                }
+            }
+
             c.win_emu.yield_thread(c.vcpu);
             return STATUS_SUCCESS;
         }
