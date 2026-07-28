@@ -661,17 +661,23 @@ namespace sogen
                 wait_handles.push_back(h);
             }
 
+            std::optional<LARGE_INTEGER> timeout_value{};
+            if (timeout.value() && !t.await_time.has_value())
+            {
+                timeout_value = timeout.try_read();
+                if (!timeout_value.has_value())
+                {
+                    t.await_objects = {};
+                    t.await_time = {};
+                    return STATUS_ACCESS_VIOLATION;
+                }
+            }
+
             t.await_objects = std::move(wait_handles);
             t.await_any = wait_type == WaitAny;
 
-            if (timeout.value() && !t.await_time.has_value())
+            if (timeout_value.has_value())
             {
-                const auto timeout_value = timeout.try_read();
-                if (!timeout_value.has_value())
-                {
-                    return STATUS_ACCESS_VIOLATION;
-                }
-
                 t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), *timeout_value);
             }
 
@@ -728,17 +734,23 @@ namespace sogen
                 wait_handles.push_back(*h);
             }
 
+            std::optional<LARGE_INTEGER> timeout_value{};
+            if (timeout.value() && !t.await_time.has_value())
+            {
+                timeout_value = timeout.try_read();
+                if (!timeout_value.has_value())
+                {
+                    t.await_objects = {};
+                    t.await_time = {};
+                    return STATUS_ACCESS_VIOLATION;
+                }
+            }
+
             t.await_objects = std::move(wait_handles);
             t.await_any = wait_type == WaitAny;
 
-            if (timeout.value() && !t.await_time.has_value())
+            if (timeout_value.has_value())
             {
-                const auto timeout_value = timeout.try_read();
-                if (!timeout_value.has_value())
-                {
-                    return STATUS_ACCESS_VIOLATION;
-                }
-
                 t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), *timeout_value);
             }
 
@@ -757,17 +769,23 @@ namespace sogen
             }
 
             auto& t = c.thread();
-            t.await_objects = {resolved_handle};
-            t.await_any = false;
 
-            if (timeout.value() && !t.await_time.has_value())
+            std::optional<LARGE_INTEGER> timeout_value{};
+            const auto needs_deadline = timeout.value() && !t.await_time.has_value();
+            if (needs_deadline)
             {
-                const auto timeout_value = timeout.try_read();
+                timeout_value = timeout.try_read();
                 if (!timeout_value.has_value())
                 {
                     return STATUS_ACCESS_VIOLATION;
                 }
+            }
 
+            t.await_objects = {resolved_handle};
+            t.await_any = false;
+
+            if (timeout_value.has_value())
+            {
                 t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), *timeout_value);
             }
 
