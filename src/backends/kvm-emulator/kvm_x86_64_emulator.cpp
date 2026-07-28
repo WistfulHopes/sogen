@@ -1467,6 +1467,7 @@ namespace sogen::kvm
 
                 this->set_msr(MSR_STAR, (0x23ull << 48) | (0x08ull << 32));
                 this->set_msr(MSR_SYSCALL_MASK, 0);
+                this->set_msr(MSR_SYSCALL_MASK, 0x4700);
             }
 
             void initialize_syscall_intercept_page()

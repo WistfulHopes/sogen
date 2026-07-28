@@ -94,6 +94,9 @@ namespace sogen
                 win_emu.record_stop(stop_reason::unknown_syscall, "0x" + utils::string::to_hex_number(syscall_id));
                 c.emu.reg<uint64_t>(x86_register::rax, STATUS_NOT_SUPPORTED);
                 win_emu.stop();
+                win_emu.log.error("Invalid syscall id: 0x%X (raw: 0x%X)\n", syscall_id, raw_syscall_id);
+                win_emu.callbacks.on_suspicious_activity("Invalid syscall id");
+                c.emu.reg<uint64_t>(x86_register::rax, STATUS_INVALID_SYSTEM_SERVICE);
                 return;
             }
 

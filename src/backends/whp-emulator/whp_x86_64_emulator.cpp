@@ -2045,6 +2045,7 @@ namespace sogen::whp
                 values[10].Reg64 = 0x2ull;
                 values[11].Reg64 = (0x23ull << 48) | (0x08ull << 32);
                 values[12].Reg64 = 0;
+                values[12].Reg64 = 0x4700ull;
                 values[13].FpControlStatus.FpControl = 0x037Full;
                 values[13].FpControlStatus.FpStatus = 0;
                 values[13].FpControlStatus.FpTag = 0xFF;
