@@ -336,13 +336,22 @@ namespace sogen
                     return out;
                 };
 
+                // PACKER_FUNCTIONALITY is a flags word; the real parent passes 0x00010000.
+                // Take the value from `--env PACKER_CHILD <hex>` so it can be swept without
+                // rebuilding ("1" keeps the observed default).
+                uint64_t functionality = 0x00010000;
+                if (it->second != u"1")
+                {
+                    functionality = std::strtoull(u16_to_u8(it->second).c_str(), nullptr, 16);
+                }
+
                 env_map[u"PACKER_SECTION"] = encode(section_handle.bits, 8);
-                env_map[u"PACKER_FUNCTIONALITY"] = encode(0x00010000, 4);
+                env_map[u"PACKER_FUNCTIONALITY"] = encode(functionality, 4);
                 env_map.erase(u"PACKER_CHILD");
 
                 win_emu.log.print(color::green,
-                                  "[PACKERCHILD] injected PACKER_SECTION=0x%" PRIx64 " (section handle) + PACKER_FUNCTIONALITY=0x10000\n",
-                                  section_handle.bits);
+                                  "[PACKERCHILD] injected PACKER_SECTION=0x%" PRIx64 " + PACKER_FUNCTIONALITY=0x%" PRIx64 "\n",
+                                  section_handle.bits, functionality);
             }
             for (const auto& [name, value] : env_map)
             {
