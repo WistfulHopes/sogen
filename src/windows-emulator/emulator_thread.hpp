@@ -298,6 +298,7 @@ namespace sogen
 
         std::optional<NTSTATUS> exit_status{};
         std::vector<handle> await_objects{};
+        uint64_t await_key{0};
         bool await_any{false};
         bool waiting_for_alert{false};
         bool alerted{false};
@@ -428,6 +429,7 @@ namespace sogen
             buffer.write_optional(this->exit_status);
             buffer.write_vector(this->await_objects);
             buffer.write(this->await_any);
+            buffer.write(this->await_key);
 
             buffer.write(this->waiting_for_alert);
             buffer.write(this->alerted);
@@ -497,6 +499,7 @@ namespace sogen
             buffer.read_optional(this->exit_status);
             buffer.read_vector(this->await_objects);
             buffer.read(this->await_any);
+            buffer.read(this->await_key);
 
             buffer.read(this->waiting_for_alert);
             buffer.read(this->alerted);

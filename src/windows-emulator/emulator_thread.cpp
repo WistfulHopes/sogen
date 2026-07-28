@@ -661,6 +661,7 @@ namespace sogen
         this->pending_status = status;
         this->await_time = {};
         this->await_objects = {};
+        this->await_key = {0};
         this->await_msg = {};
         this->await_msg_mask = {};
         this->await_io_completion = {};
@@ -1048,32 +1049,60 @@ namespace sogen
                 all_signaled = true;
                 for (uint32_t i = 0; i < this->await_objects.size(); ++i)
                 {
-                    const auto& obj = this->await_objects[i];
-
-                    const auto state = observe_object_signal(process, obj, this->id);
-                    const auto signaled = state != wait_state::not_signaled;
-                    all_signaled &= signaled;
-
-                    if (state == wait_state::abandoned && !abandoned_index.has_value())
+                    if (this->await_key == 0)
                     {
-                        abandoned_index = i;
+                    
+                        const auto& obj = this->await_objects[i];
+
+                        const auto state = observe_object_signal(process, obj, this->id);
+                        const auto signaled = state != wait_state::not_signaled;
+                        all_signaled &= signaled;
+
+                        if (state == wait_state::abandoned && !abandoned_index.has_value())
+                        {
+                            abandoned_index = i;
+                        }
+
+                        if (signaled && this->await_any)
+                        {
+                            const auto consumed_state = consume_object_signal(process, obj, this->id);
+                            if (!consumed_state.has_value())
+                            {
+                                throw std::runtime_error("Failed to consume object signal!");
+                            }
+
+                            if (this->await_msg_mask.has_value())
+                            {
+                                this->queue_status_changed_bits |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+                            }
+
+                            this->mark_as_ready(*consumed_state == wait_state::abandoned ? (STATUS_ABANDONED_WAIT_0 + i) : (STATUS_WAIT_0 + i));
+                            return true;
+                        }                        
                     }
-
-                    if (signaled && this->await_any)
+                    else
                     {
-                        const auto consumed_state = consume_object_signal(process, obj, this->id);
-                        if (!consumed_state.has_value())
-                        {
-                            throw std::runtime_error("Failed to consume object signal!");
-                        }
+                        const auto& obj = this->await_objects[i];
+                        
+                        const auto signaled = process.keyed_events.get(obj)->signaled[this->await_key];
+                        all_signaled &= signaled;
 
-                        if (this->await_msg_mask.has_value())
+                        if (signaled && this->await_any)
                         {
-                            this->queue_status_changed_bits |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
-                        }
+                            const auto consumed_state = consume_object_signal(process, obj, this->id);
+                            if (!consumed_state.has_value())
+                            {
+                                throw std::runtime_error("Failed to consume object signal!");
+                            }
 
-                        this->mark_as_ready(*consumed_state == wait_state::abandoned ? (STATUS_ABANDONED_WAIT_0 + i) : (STATUS_WAIT_0 + i));
-                        return true;
+                            if (this->await_msg_mask.has_value())
+                            {
+                                this->queue_status_changed_bits |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+                            }
+
+                            this->mark_as_ready(*consumed_state == wait_state::abandoned ? (STATUS_ABANDONED_WAIT_0 + i) : (STATUS_WAIT_0 + i));
+                            return true;
+                        }
                     }
                 }
             }

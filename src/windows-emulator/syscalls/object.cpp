@@ -549,7 +549,7 @@ namespace sogen
 
             default:
                 c.win_emu.log.error("Wait handle type not supported: %u\n", static_cast<uint32_t>(h.value.type));
-                return STATUS_OBJECT_TYPE_MISMATCH;
+                return STATUS_INVALID_HANDLE;
             }
         }
 
@@ -666,7 +666,13 @@ namespace sogen
 
             if (timeout.value() && !t.await_time.has_value())
             {
-                t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), timeout.read());
+                const auto timeout_value = timeout.try_read();
+                if (!timeout_value.has_value())
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+
+                t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), *timeout_value);
             }
 
             c.win_emu.yield_thread(c.vcpu, alertable);
@@ -727,7 +733,13 @@ namespace sogen
 
             if (timeout.value() && !t.await_time.has_value())
             {
-                t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), timeout.read());
+                const auto timeout_value = timeout.try_read();
+                if (!timeout_value.has_value())
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+
+                t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), *timeout_value);
             }
 
             c.win_emu.yield_thread(c.vcpu, alertable);
@@ -750,7 +762,13 @@ namespace sogen
 
             if (timeout.value() && !t.await_time.has_value())
             {
-                t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), timeout.read());
+                const auto timeout_value = timeout.try_read();
+                if (!timeout_value.has_value())
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+
+                t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), *timeout_value);
             }
 
             c.win_emu.yield_thread(c.vcpu, alertable);

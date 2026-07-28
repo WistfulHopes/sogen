@@ -50,6 +50,27 @@ namespace sogen
         }
     };
 
+    struct keyed_event : ref_counted_object
+    {
+        std::map<uint64_t, bool> signaled{};
+        std::map<uint64_t, EVENT_TYPE> type{};
+        std::u16string name{};
+
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write_map(this->signaled);
+            buffer.write_map(this->type);
+            buffer.write(this->name);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read_map(this->signaled);
+            buffer.read_map(this->type);
+            buffer.read(this->name);
+        }
+    };
+    
     struct accelerator_table_entry
     {
         uint8_t flags{};

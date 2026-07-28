@@ -674,6 +674,7 @@ namespace sogen
         buffer.write(this->default_monitor_handle);
         buffer.write(this->default_desktop_window_handle);
         buffer.write(this->events);
+        buffer.write(this->keyed_events);
         buffer.write(this->files);
         buffer.write_map(this->file_locks);
         buffer.write(this->sections);
@@ -765,6 +766,7 @@ namespace sogen
         buffer.read(this->default_monitor_handle);
         buffer.read(this->default_desktop_window_handle);
         buffer.read(this->events);
+        buffer.read(this->keyed_events);
         buffer.read(this->files);
         buffer.read_map(this->file_locks);
         buffer.read(this->sections);

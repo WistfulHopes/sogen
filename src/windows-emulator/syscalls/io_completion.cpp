@@ -311,7 +311,7 @@ namespace sogen
             if (!io_completion_wait::is_wait_completion_target_type(resolved_target_handle))
             {
                 c.win_emu.log.error("Wait handle type not supported: %u\n", static_cast<uint32_t>(resolved_target_handle.value.type));
-                return STATUS_OBJECT_TYPE_MISMATCH;
+                return STATUS_INVALID_HANDLE;
             }
 
             const auto target_exists = [&]() -> bool {

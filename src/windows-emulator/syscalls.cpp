@@ -30,6 +30,16 @@ namespace sogen
         NTSTATUS handle_NtOpenEvent(const syscall_context& c, emulator_object<uint64_t> event_handle, ACCESS_MASK desired_access,
                                     emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
 
+        // syscalls/keyed_event.cpp:
+        NTSTATUS handle_NtCreateKeyedEvent(const syscall_context& c, emulator_object<handle> keyed_event_handle, ACCESS_MASK desired_access,
+                                           emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, ULONG flags);
+        NTSTATUS handle_NtOpenKeyedEvent(const syscall_context& c, emulator_object<uint64_t> keyed_event_handle, ACCESS_MASK desired_access,
+                                         emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
+        NTSTATUS handle_NtReleaseKeyedEvent(const syscall_context& c, uint64_t keyed_event_handle, uint64_t key, BOOLEAN alertable,
+                                            emulator_object<LARGE_INTEGER> timeout);
+        NTSTATUS handle_NtWaitForKeyedEvent(const syscall_context& c, uint64_t keyed_event_handle, uint64_t key, BOOLEAN alertable,
+                                            emulator_object<LARGE_INTEGER> timeout);
+
         // syscalls/exception.cpp
         NTSTATUS handle_NtRaiseHardError(const syscall_context& c, NTSTATUS error_status, ULONG number_of_parameters,
                                          emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> unicode_string_parameter_mask,
@@ -702,6 +712,7 @@ namespace sogen
         BOOL handle_NtUserDisableThreadIme();
         BOOL handle_NtUserGetPointerDevices();
         BOOL handle_NtUserHwndQueryRedirectionInfo();
+        BOOL handle_NtUserShellHandwritingDelegateInput();
 
         // syscalls/gdi.cpp:
         NTSTATUS handle_NtDxgkIsFeatureEnabled();
@@ -1217,6 +1228,10 @@ namespace sogen
         add_handler(NtSetThreadExecutionState);
         add_handler(NtSetEvent);
         add_handler(NtPulseEvent);
+        add_handler(NtCreateKeyedEvent);
+        add_handler(NtOpenKeyedEvent);
+        add_handler(NtReleaseKeyedEvent);
+        add_handler(NtWaitForKeyedEvent);
         add_handler(NtClose);
         add_handler(NtOpenKey);
         add_handler(NtAllocateVirtualMemory);
@@ -1710,6 +1725,7 @@ namespace sogen
         add_handler(NtUserDisableThreadIme);
         add_handler(NtUserGetPointerDevices);
         add_handler(NtUserHwndQueryRedirectionInfo);
+        add_handler(NtUserShellHandwritingDelegateInput);
 
 #undef add_handler
     }

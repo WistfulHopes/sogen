@@ -513,6 +513,7 @@ namespace sogen
         handle default_monitor_handle{};
         handle default_desktop_window_handle{};
         handle_store<handle_types::event, event> events{};
+        handle_store<handle_types::event, keyed_event> keyed_events{};
         handle_store<handle_types::file, file> files{};
         utils::insensitive_u16string_map<file_lock_ranges> file_locks{};
         handle_store<handle_types::section, section, 2> sections{};
