@@ -806,6 +806,8 @@ namespace sogen
         auto child = std::make_unique<windows_emulator>(std::move(backend), std::move(app_settings), this->settings_,
                                                         emulator_callbacks{}, std::move(interfaces));
 
+        child->is_child_ = true;
+
         auto* child_ptr = this->children_.emplace_back(std::move(child)).get();
 
         if (this->callbacks.on_child_created)
@@ -814,6 +816,102 @@ namespace sogen
         }
 
         return child_ptr;
+    }
+
+    bool windows_emulator::has_live_children() const
+    {
+        return std::ranges::any_of(this->children_, [](const auto& child) { return !child->process.exit_status.has_value(); });
+    }
+
+    bool windows_emulator::run_children_slice(const size_t instructions)
+    {
+        bool ran = false;
+
+        for (auto& child : this->children_)
+        {
+            if (child->process.exit_status.has_value())
+            {
+                continue;
+            }
+
+            try
+            {
+                child->start(instructions);
+            }
+            catch (const std::exception& e)
+            {
+                this->log.print(color::red, "[CHILDPROC] child aborted: %s\n", e.what());
+                child->process.exit_status = STATUS_UNSUCCESSFUL;
+                continue;
+            }
+
+            ran = true;
+
+            if (child->process.exit_status.has_value())
+            {
+                this->log.print(color::green, "[CHILDPROC] child exited with 0x%X\n",
+                                static_cast<uint32_t>(*child->process.exit_status));
+            }
+        }
+
+        return ran;
+    }
+
+    bool windows_emulator::share_section_with_child(const uint32_t index, windows_emulator& child)
+    {
+        auto* parent_section = this->process.sections.get_by_index(index);
+        if (!parent_section || !parent_section->file_name.empty())
+        {
+            // File-backed sections map a fresh copy of the file per view, so there is no
+            // single buffer to share.
+            return false;
+        }
+
+        const auto size = static_cast<size_t>(page_align_up(parent_section->maximum_size));
+        if (size == 0)
+        {
+            return false;
+        }
+
+        auto& backing = this->shared_section_backings[index];
+        if (!backing)
+        {
+            backing = std::make_shared<host_page_buffer>(size);
+
+            // If the parent already mapped a view, re-back it in place: same guest address,
+            // now aliased onto the host buffer. Pointers the guest already holds stay valid.
+            if (parent_section->backing_address)
+            {
+                this->memory.read_memory(parent_section->backing_address, backing->data(), size);
+                this->memory.release_memory(parent_section->backing_address, size);
+
+                if (!this->memory.allocate_host_memory(parent_section->backing_address, size, backing->data(),
+                                                       map_nt_to_emulator_protection(parent_section->section_page_protection)))
+                {
+                    this->shared_section_backings.erase(index);
+                    return false;
+                }
+            }
+        }
+
+        section child_section{};
+        child_section.name = parent_section->name;
+        child_section.maximum_size = parent_section->maximum_size;
+        child_section.section_page_protection = parent_section->section_page_protection;
+        child_section.allocation_attributes = parent_section->allocation_attributes;
+
+        const auto [child_handle, stored] = child.process.sections.store_at_index(index, std::move(child_section));
+        if (!stored)
+        {
+            return false;
+        }
+
+        child.shared_section_backings[index] = backing;
+
+        this->log.print(color::green, "[SHARESEC] section index %u -> child handle 0x%" PRIx64 " (%zu bytes, host %p)\n", index,
+                        child_handle.bits, size, static_cast<void*>(backing->data()));
+
+        return true;
     }
 
     void windows_emulator::setup_process_if_necessary()

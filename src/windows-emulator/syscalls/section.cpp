@@ -468,14 +468,32 @@ namespace sogen
 
                 if (section_entry->backing_address == 0)
                 {
-                    const auto reserve_only = section_entry->allocation_attributes == SEC_RESERVE;
-                    const auto backing = c.win_emu.memory.allocate_memory(backing_size, protection, reserve_only, 0,
-                                                                          memory_region_kind::pagefile_section_view);
-                    if (!backing)
+                    // A section shared with another emulated process is backed by one host
+                    // buffer aliased into both guests, so each side observes the other's
+                    // writes. Everything else gets ordinary private guest memory.
+                    const auto index = std::remove_reference_t<decltype(c.proc.sections)>::index_of(section_handle);
+                    const auto shared = c.win_emu.shared_section_backings.find(index);
+                    if (shared != c.win_emu.shared_section_backings.end() && shared->second)
                     {
-                        return STATUS_NO_MEMORY;
+                        const auto address = c.win_emu.memory.find_free_allocation_base(backing_size);
+                        if (!address || !c.win_emu.memory.allocate_host_memory(address, backing_size, shared->second->data(), protection))
+                        {
+                            return STATUS_NO_MEMORY;
+                        }
+
+                        section_entry->backing_address = address;
                     }
-                    section_entry->backing_address = backing;
+                    else
+                    {
+                        const auto reserve_only = section_entry->allocation_attributes == SEC_RESERVE;
+                        const auto backing = c.win_emu.memory.allocate_memory(backing_size, protection, reserve_only, 0,
+                                                                              memory_region_kind::pagefile_section_view);
+                        if (!backing)
+                        {
+                            return STATUS_NO_MEMORY;
+                        }
+                        section_entry->backing_address = backing;
+                    }
                 }
 
                 const auto aligned_offset = page_align_down(static_cast<uint64_t>(offset));
@@ -677,6 +695,23 @@ namespace sogen
                 }
 
                 return STATUS_INVALID_PARAMETER;
+            }
+
+            // A section shared with another emulated process is backed by host memory, so its
+            // region is registered as mmio rather than pagefile_section_view and the kind check
+            // below would miss it. Unmapping such a view must still succeed, and must not free
+            // the buffer -- the other process is still mapping it.
+            for (const auto& [section_index, section_entry] : c.proc.sections)
+            {
+                if (!section_entry.backing_address || !c.win_emu.shared_section_backings.contains(section_index))
+                {
+                    continue;
+                }
+
+                if (is_within_start_and_length(base_address, section_entry.backing_address, page_align_up(section_entry.maximum_size)))
+                {
+                    return STATUS_SUCCESS;
+                }
             }
 
             const auto region_info = c.win_emu.memory.get_region_info(base_address);

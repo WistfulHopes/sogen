@@ -629,89 +629,87 @@ namespace sogen
 
         NTSTATUS handle_NtYieldExecution(const syscall_context& c)
         {
-            // DIAGNOSTIC: Theia's parent busy-waits here, and our thread-based "child" runs
-            // the same runtime.dll code, so the log alone cannot say which thread is
-            // spinning. Report each distinct thread id once so it is unambiguous whether the
-            // child ever gets scheduled.
-            if (c.vcpu.active_thread)
+            // A child yields because it is waiting on its parent -- and the parent is stopped
+            // for as long as this slice runs. End the slice immediately so the parent gets to
+            // run and answer; the parent's own yield resumes this child right where it left
+            // off. Without this the two sides only ping in one direction and the child gives
+            // up after a handful of spins.
+            if (c.win_emu.is_child())
             {
-                static std::set<uint32_t> seen_yield_tids;
-                const auto tid = c.vcpu.active_thread->id;
-                if (seen_yield_tids.insert(tid).second)
-                {
-                    c.win_emu.log.print(color::cyan, "[YIELD] first NtYieldExecution from tid %u\n", tid);
-                }
+                c.win_emu.yield_thread(c.vcpu);
+                c.win_emu.stop();
+                return STATUS_SUCCESS;
             }
 
-            // Once the child has been spinning a while, dump every section's backing store.
-            // If the child WROTE a request into the shared section before waiting, the
-            // handshake is child-first and the parent only has to answer it; if it is still
-            // all zeros, the child is purely a consumer and the parent must speak first.
+            // Theia's parent busy-waits here while its child works, which makes this the
+            // natural place to interleave the two emulated processes: every yield hands each
+            // live child another instruction slice. Without it the handshake deadlocks --
+            // both sides poll the shared section, so neither can run while the other is
+            // stopped.
+            if (c.win_emu.has_live_children())
             {
-                // SWEEP: the child posts [0x00]=2, [0x40]=5 into the shared section and then
-                // spins. Act as the parent by writing candidate replies into [0x00] and
-                // watching for the spin to break (the yield counter stops climbing and new
-                // syscalls appear). Same empirical approach that settled the EAC UNK1 value.
-                static uint64_t sweep_count = 0;
-                static uint8_t candidate = 3;
-                if (++sweep_count > 60000 && (sweep_count % 20000) == 0 && candidate < 16)
-                {
-                    for (auto& [sec_handle, sec] : c.proc.sections)
-                    {
-                        if (!sec.backing_address)
-                        {
-                            continue;
-                        }
-                        c.emu.write_memory<uint8_t>(sec.backing_address, candidate);
-                        c.win_emu.log.print(color::cyan, "[SWEEP] wrote [0x00]=%u into section 0x%" PRIx64 "\n", candidate,
-                                            static_cast<uint64_t>(sec_handle));
-                    }
-                    ++candidate;
-                }
+                c.win_emu.run_children_slice(CHILD_SLICE_INSTRUCTIONS);
+            }
 
+            // Watch the shared mailbox. The child posts a request into the section and polls
+            // for the parent's answer, so these bytes are the whole conversation. Dense at
+            // first because the handshake plays out within the first few hundred yields, then
+            // sparse. Not gated on has_live_children: the state AFTER a child gives up is
+            // exactly what says whether the parent ever answered.
+            {
                 static uint64_t yield_count = 0;
-                if (++yield_count == 50000)
+                ++yield_count;
+
+                if (!c.win_emu.shared_section_backings.empty() && (yield_count <= 400 || (yield_count % 2000) == 0))
                 {
-                    int idx = 0;
                     for (auto& [sec_handle, sec] : c.proc.sections)
                     {
-                        if (!sec.backing_address)
+                        if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
                         {
                             continue;
                         }
-                        const auto size = static_cast<size_t>(std::min<uint64_t>(sec.maximum_size, 0x100000));
-                        std::vector<uint8_t> buf(size);
+
+                        std::array<uint8_t, 16> head{};
+                        std::array<uint8_t, 16> at_0x40{};
                         try
                         {
-                            c.emu.read_memory(sec.backing_address, buf.data(), size);
+                            c.emu.read_memory(sec.backing_address, head.data(), head.size());
+                            c.emu.read_memory(sec.backing_address + 0x40, at_0x40.data(), at_0x40.size());
                         }
                         catch (...)
                         {
                             continue;
                         }
-                        size_t nonzero = 0, first = SIZE_MAX;
-                        for (size_t i = 0; i < size; ++i)
+
+                        static std::array<uint8_t, 16> last_head{};
+                        static std::array<uint8_t, 16> last_0x40{};
+                        static bool logged_once = false;
+
+                        // Only report when something actually changed, otherwise the parent's
+                        // spin buries the log.
+                        if (logged_once && head == last_head && at_0x40 == last_0x40)
                         {
-                            if (buf[i])
-                            {
-                                ++nonzero;
-                                if (first == SIZE_MAX)
-                                {
-                                    first = i;
-                                }
-                            }
+                            continue;
                         }
-                        char path[256];
-                        sprintf(path, "C:\\dev\\tokon\\dumps\\child_section_%d.bin", idx++);
-                        if (FILE* f = fopen(path, "wb"))
+
+                        last_head = head;
+                        last_0x40 = at_0x40;
+                        logged_once = true;
+
+                        std::string line{};
+                        for (const auto b : head)
                         {
-                            fwrite(buf.data(), 1, size, f);
-                            fclose(f);
+                            line += std::format("{:02x} ", b);
                         }
-                        c.win_emu.log.print(color::green,
-                                            "[CHILDSEC] after 50k yields: handle=0x%" PRIx64 " size=%zu nonzero=%zu firstNonZero=%zd -> %s\n",
-                                            static_cast<uint64_t>(sec_handle), size, nonzero,
-                                            first == SIZE_MAX ? -1 : static_cast<ptrdiff_t>(first), path);
+                        line += " | 0x40: ";
+                        for (const auto b : at_0x40)
+                        {
+                            line += std::format("{:02x} ", b);
+                        }
+
+                        c.win_emu.log.print(color::cyan, "[MAILBOX] yield %llu section %u: %s\n",
+                                            static_cast<unsigned long long>(yield_count), static_cast<unsigned>(sec_handle),
+                                            line.c_str());
                     }
                 }
             }

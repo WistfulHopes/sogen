@@ -25,6 +25,49 @@ namespace sogen
     struct io_device;
     class windows_emulator;
 
+    // The boot slice gives a freshly spawned child enough of a head start to map its
+    // inherited section; every parent yield then hands it another slice. Sized to amortise
+    // start()'s per-call setup, which spins up interrupt and worker threads.
+    inline constexpr size_t CHILD_BOOT_INSTRUCTIONS = 50'000'000;
+    inline constexpr size_t CHILD_SLICE_INSTRUCTIONS = 1'000'000;
+
+    // Host memory aliased into a guest must be page aligned; WHP rejects anything else
+    // outright, so a plain std::vector cannot back a shared section.
+    class host_page_buffer
+    {
+      public:
+        explicit host_page_buffer(const size_t size)
+            : size_(static_cast<size_t>(page_align_up(size))),
+              data_(static_cast<uint8_t*>(::operator new(size_, std::align_val_t{0x1000})))
+        {
+            std::memset(this->data_, 0, this->size_);
+        }
+
+        ~host_page_buffer()
+        {
+            ::operator delete(this->data_, std::align_val_t{0x1000});
+        }
+
+        host_page_buffer(const host_page_buffer&) = delete;
+        host_page_buffer& operator=(const host_page_buffer&) = delete;
+        host_page_buffer(host_page_buffer&&) = delete;
+        host_page_buffer& operator=(host_page_buffer&&) = delete;
+
+        uint8_t* data() const
+        {
+            return this->data_;
+        }
+
+        size_t size() const
+        {
+            return this->size_;
+        }
+
+      private:
+        size_t size_{};
+        uint8_t* data_{};
+    };
+
     struct emulator_callbacks : module_manager::callbacks, process_context::callbacks
     {
         template <typename T>
@@ -51,16 +94,13 @@ namespace sogen
         opt_func<void(io_device& device, std::u16string_view device_name, ULONG code)> on_ioctrl{};
         opt_func<void(uint32_t fail_code)> on_fast_fail{};
 
-        // Creates the CPU backend for a child process. windows-emulator sits below
-        // backend-selection in the link graph and cannot construct one itself, so the
-        // consumer that picked the backend supplies this. Left null, NtCreateUserProcess
-        // reports STATUS_NOT_SUPPORTED and nothing else changes.
+        // windows-emulator sits below backend-selection in the link graph and cannot
+        // construct a backend itself, so the consumer that picked one supplies it. Left null,
+        // NtCreateUserProcess reports STATUS_NOT_SUPPORTED.
         std::function<std::unique_ptr<x86_64_emulator>()> child_backend_factory{};
 
-        // Fired once a child emulator is constructed but before it runs, so a consumer can
-        // attach its own logging/analysis to it. Without this a child is nearly silent:
-        // syscall and module tracing live in the analyzer's callbacks, and a child starts
-        // with none.
+        // Fired after a child emulator is constructed, before it runs. Syscall and module
+        // tracing live in the consumer's callbacks, so without this a child is nearly silent.
         std::function<void(windows_emulator& child)> on_child_created{};
     };
 
@@ -159,8 +199,7 @@ namespace sogen
 
         application_settings application_settings_{};
 
-        // Kept so child processes can be constructed with the same emulation root,
-        // registry, path/port mappings and timing knobs as their parent.
+        // Kept so children inherit the parent's root, registry, mappings and timing knobs.
         emulator_settings settings_{};
 
         std::unique_ptr<x86_64_emulator> emu_{};
@@ -170,10 +209,9 @@ namespace sogen
         std::unique_ptr<ui_backend> ui_backend_{};
         std::unique_ptr<audio_backend> audio_backend_{};
         bool setup_completed_{false};
+        bool is_child_{false};
 
-        // Child processes spawned via NtCreateUserProcess. Each is a full emulator of its
-        // own; they must outlive the syscall handler that created them, so they are owned
-        // here rather than by the handler.
+        // Must outlive the syscall handler that creates them, hence owned here.
         std::vector<std::unique_ptr<windows_emulator>> children_{};
 
       public:
@@ -261,12 +299,34 @@ namespace sogen
             return *this->audio_backend_;
         }
 
-        // Spawns a child process as a second, independent emulator that inherits this
-        // one's settings but runs headless (SDL is process-global; a second live SDL
-        // backend would steal the parent's window and input). The child is owned by this
-        // emulator and outlives the syscall handler that created it. Returns nullptr when
-        // callbacks.child_backend_factory is unset, i.e. the consumer cannot make backends.
+        // Inherits this emulator's settings but runs headless: SDL is process-global, so a
+        // second live SDL backend would steal the parent's window and input. Returns nullptr
+        // when callbacks.child_backend_factory is unset.
         windows_emulator* create_child_process(application_settings app_settings);
+
+        // Makes the pagefile-backed section at `index` visible to `child` under the same
+        // handle value, with one host buffer aliased into both guests. Theia hands its child a
+        // section handle through the environment and both sides then poll the shared page,
+        // which per-process copies cannot support.
+        bool share_section_with_child(uint32_t index, windows_emulator& child);
+
+        // Each start() call resumes a child where its previous slice left off. Both sides of
+        // Theia's handshake poll the shared section, so neither can run to completion while
+        // the other is stopped. Returns true if any child ran.
+        bool run_children_slice(size_t instructions);
+
+        bool has_live_children() const;
+
+        // A child runs in bounded slices driven by its parent, so it yields differently.
+        bool is_child() const
+        {
+            return this->is_child_;
+        }
+
+        // Keyed by index in process.sections, so parent and child agree on the handle value.
+        // Kept out of `section` itself because that struct is serialized for snapshots and a
+        // host pointer has no meaning in one.
+        std::map<uint32_t, std::shared_ptr<host_page_buffer>> shared_section_backings{};
 
         void handle_ui_event(const ui_event& event);
         void deliver_raw_input(const process_context::raw_input_payload& payload, hwnd explicit_target);

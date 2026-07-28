@@ -213,6 +213,26 @@ namespace sogen
             return this->store_and_get(std::move(value)).first;
         }
 
+        // Stores at a caller-chosen index so an exact handle VALUE can be reproduced.
+        // Handle inheritance needs this: a child process is handed a numeric handle by its
+        // parent (Theia passes one through the environment) and must find the same object
+        // behind it. Returns {handle, nullptr} if the index is already occupied.
+        std::pair<handle, T*> store_at_index(const index_type index, T value)
+        {
+            if (this->block_mutation_)
+            {
+                throw std::runtime_error("Mutation of handle store is blocked!");
+            }
+
+            const auto [it, inserted] = this->store_.emplace(index, std::move(value));
+            if (!inserted)
+            {
+                return {make_handle(index), nullptr};
+            }
+
+            return {make_handle(index), &it->second};
+        }
+
         handle make_handle(const index_type index) const
         {
             handle h{};
@@ -222,6 +242,13 @@ namespace sogen
             h.value.id = index << IndexShift;
 
             return h;
+        }
+
+        // Inverse of make_handle. Lets callers key side tables by index without repeating
+        // this store's IndexShift.
+        static index_type index_of(const handle h)
+        {
+            return static_cast<index_type>(h.value.id) >> IndexShift;
         }
 
         T* get_by_index(const uint32_t index)

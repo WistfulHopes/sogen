@@ -1208,17 +1208,9 @@ namespace sogen
                     }
                 }
 
-                // ---- Real child process ---------------------------------------------
-                // A second, fully independent windows_emulator: its own address space, PEB,
-                // handle table and image base. Anything less (a thread at the child's entry
-                // point in the parent's address space) collides with the parent's already
-                // initialised runtime.dll globals and deadlocks on the loader lock.
-                //
-                // The environment is passed through verbatim so PACKER_SECTION /
-                // PACKER_FUNCTIONALITY arrive exactly as Theia wrote them.
                 if (image_path.starts_with(u"\\??\\"))
                 {
-                    image_path.erase(0, 4); // NT device prefix; the child wants a Win32 path
+                    image_path.erase(0, 4);
                 }
 
                 windows_emulator* child = nullptr;
@@ -1232,24 +1224,25 @@ namespace sogen
 
                 if (!child)
                 {
-                    // No backend factory (or no image path): behave exactly as before.
                     c.win_emu.log.print(color::red, "[CHILDPROC] child not created -- inert handles only\n");
                     return STATUS_SUCCESS;
                 }
 
-                // start() runs the child to completion, so the parent is frozen for its
-                // duration. Fine while the two sides don't yet share memory; interleaving
-                // comes with the shared-section work.
+                // Theia names the section it wants via PACKER_SECTION in the environment, so the
+                // handle value must match exactly. Sharing every pagefile-backed section avoids
+                // having to decode that variable here.
+                for (const auto& index : c.proc.sections | std::views::keys)
+                {
+                    c.win_emu.share_section_with_child(index, *child);
+                }
+
+                // Not child->start(): running the child to completion would freeze the parent
+                // inside this handler, and the two share memory -- the child writes its mailbox
+                // and polls for a reply the stopped parent could never write. The child is
+                // instead scheduled in slices from handle_NtYieldExecution; this first slice
+                // just gets it far enough to map the section.
                 c.win_emu.log.print(color::green, "[CHILDPROC] ---- child emulator starting ----\n");
-                try
-                {
-                    child->start();
-                }
-                catch (const std::exception& e)
-                {
-                    c.win_emu.log.print(color::red, "[CHILDPROC] child aborted: %s\n", e.what());
-                }
-                c.win_emu.log.print(color::green, "[CHILDPROC] ---- child emulator stopped ----\n");
+                c.win_emu.run_children_slice(CHILD_BOOT_INSTRUCTIONS);
 
                 return STATUS_SUCCESS;
             }
