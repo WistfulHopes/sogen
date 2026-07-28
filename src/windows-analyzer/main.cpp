@@ -68,6 +68,7 @@ namespace sogen
             std::string report_format{"jsonl"};
             std::string whp_execution_hook_mode{"auto"};
             std::optional<backend_type> backend{};
+            std::optional<backend_type> child_backend{};
             bool disable_instruction_precision{false};
             uint32_t vcpu_count{1};
             std::filesystem::path registry_path{get_current_binary_dir() / "registry"};
@@ -583,8 +584,27 @@ namespace sogen
             };
 
             const auto concise_logging = options.concise_logging;
+
+            // One per spawned child process. Declared before win_emu on purpose: win_emu owns
+            // the child emulators, whose callbacks reference these, so they must be destroyed
+            // first. A deque keeps existing elements' addresses stable as more are added.
+            std::deque<analysis_context> child_contexts{};
+
             const auto win_emu = setup_emulator(options, args);
             context.win_emu = win_emu.get();
+
+            // windows-emulator links below backend-selection and can't build a backend for a
+            // child process itself, so hand it a factory. Children get their own backend
+            // choice because WHP cannot host two mapping partitions in one process.
+            // `options` outlives win_emu, which is local to this function.
+            win_emu->callbacks.child_backend_factory = [&options] {
+                auto child_options = options;
+                child_options.backend = options.child_backend ? options.child_backend : options.backend;
+                // unicorn (the WHP fallback) is single-vCPU only, and a child process here is
+                // a helper rather than a workload worth parallelising.
+                child_options.vcpu_count = 1;
+                return create_configured_backend(child_options);
+            };
 
             std::vector<std::unique_ptr<analysis_reporter>> reporters{};
             reporters.emplace_back(create_console_reporter(win_emu->log, console_reporter_settings{
@@ -652,6 +672,21 @@ namespace sogen
 
             register_analysis_callbacks(context);
             watch_system_objects(context, options.modules, options.verbose_logging, options.concise_logging);
+
+            // Give child processes the same instrumentation as the parent, reusing the
+            // parent's reporters so both write to one stream. child_contexts is declared
+            // above win_emu so it outlives the children that point into it.
+            win_emu->callbacks.on_child_created = [&](windows_emulator& child) {
+                auto& child_context = child_contexts.emplace_back();
+                child_context.settings = &options;
+                child_context.win_emu = &child;
+                child_context.reporters = context.reporters;
+
+                child.log.disable_output(concise_logging);
+
+                register_analysis_callbacks(child_context);
+                watch_system_objects(child_context, options.modules, options.verbose_logging, options.concise_logging);
+            };
 
             const auto& exe = *win_emu->mod_manager.executable;
             const auto is_whp = win_emu->emu().get_name() == "Windows Hypervisor Platform";
@@ -885,6 +920,11 @@ namespace sogen
             app.add_option("--backend", backend_name, "Select CPU backend: unicorn, icicle, whp or kvm (overrides env)")
                 ->check(CLI::IsMember({"unicorn", "icicle", "whp", "kvm"}));
 
+            std::string child_backend_name{};
+            app.add_option("--child-backend", child_backend_name,
+                           "CPU backend for child processes (default: same as --backend, except whp -> unicorn)")
+                ->check(CLI::IsMember({"unicorn", "icicle", "whp", "kvm"}));
+
             std::vector<std::string> tracked_modules{};
             app.add_option("-m,--module", tracked_modules, "Specify module(s) to track")->allow_extra_args(false);
 
@@ -912,15 +952,30 @@ namespace sogen
                     throw std::runtime_error("GDB debugging requires --vcpus 1");
                 }
 
+                static const std::map<std::string, backend_type> backends{
+                    {"unicorn", backend_type::unicorn},
+                    {"icicle", backend_type::icicle},
+                    {"whp", backend_type::whp},
+                    {"kvm", backend_type::kvm},
+                };
+
                 if (!backend_name.empty())
                 {
-                    static const std::map<std::string, backend_type> backends{
-                        {"unicorn", backend_type::unicorn},
-                        {"icicle", backend_type::icicle},
-                        {"whp", backend_type::whp},
-                        {"kvm", backend_type::kvm},
-                    };
                     options.backend = backends.at(backend_name);
+                }
+
+                if (!child_backend_name.empty())
+                {
+                    options.child_backend = backends.at(child_backend_name);
+                }
+                else if (options.backend == backend_type::whp)
+                {
+                    // Measured: WHP allows only ONE partition per host process to hold GPA
+                    // mappings. A second partition creates and sets up fine, but its first
+                    // WHvMapGpaRange returns 0xC0370008 (HV_STATUS_OPERATION_DENIED) until
+                    // the first partition is deleted. So a WHP parent cannot have WHP
+                    // children in-process; fall back to unicorn for them.
+                    options.child_backend = backend_type::unicorn;
                 }
 
                 for (auto& module_name : tracked_modules)

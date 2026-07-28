@@ -1038,20 +1038,25 @@ namespace sogen
 
         NTSTATUS handle_NtCreateUserProcess(const syscall_context& c)
         {
-            // Theia spawns a child process during init. sogen has no child-process support,
-            // so this returns STATUS_NOT_SUPPORTED (0xC00000BB) -- which is exactly the code
-            // Theia then reports: "The program encountered C00000BB ... during
-            // initialization." Log WHAT it is trying to spawn, since that decides whether we
-            // need real child support or can satisfy it some cheaper way.
+            // Theia spawns runtime.dll as a child process during init, then talks to it
+            // through a shared section. The parent builds the child's
+            // RTL_USER_PROCESS_PARAMETERS in its own address space, so everything needed to
+            // boot the child is readable from right here (arg 9 / index 8):
+            //   +0x60 ImagePathName (UNICODE_STRING)  +0x70 CommandLine  +0x80 Environment
             //
-            // NtCreateUserProcess arg 9 (index 8) is PRTL_USER_PROCESS_PARAMETERS:
-            //   +0x60 ImagePathName (UNICODE_STRING)   +0x70 CommandLine (UNICODE_STRING)
+            // The environment block is the actual parent->child interface -- the
+            // PS_ATTRIBUTE_LIST carries only the image name, no handle list, no client id,
+            // no token. Theia injects PACKER_SECTION (a section handle) and
+            // PACKER_FUNCTIONALITY there, so those values must reach the child verbatim.
+            std::u16string image_path{};
+            utils::unordered_insensitive_u16string_map<std::u16string> child_env{};
+
             try
             {
                 const auto params = get_syscall_argument(c.emu, 8);
                 if (params)
                 {
-                    const auto read_ustr = [&](const uint64_t addr) -> std::string {
+                    const auto read_ustr = [&](const uint64_t addr) -> std::u16string {
                         const auto length = c.emu.read_memory<uint16_t>(addr);
                         const auto buffer = c.emu.read_memory<uint64_t>(addr + 8);
                         if (!length || !buffer || length > 0x1000)
@@ -1060,18 +1065,14 @@ namespace sogen
                         }
                         std::u16string str(length / sizeof(char16_t), u'\0');
                         c.emu.read_memory(buffer, str.data(), length);
-                        return u16_to_u8(str);
+                        return str;
                     };
 
-                    c.win_emu.log.print(color::red, "[CHILDPROC] image='%s' cmdline='%s'\n",
-                                        read_ustr(params + 0x60).c_str(), read_ustr(params + 0x70).c_str());
+                    image_path = read_ustr(params + 0x60);
+                    c.win_emu.log.print(color::red, "[CHILDPROC] image='%s' cmdline='%s'\n", u16_to_u8(image_path).c_str(),
+                                        u16_to_u8(read_ustr(params + 0x70)).c_str());
 
-                    // The PS_ATTRIBUTE_LIST carries only the image name -- no handle list,
-                    // no client id, no token. So whatever marks this child as legitimate
-                    // (rather than "You aren't supposed to be here") must travel another
-                    // way. The environment block is the prime suspect: Theia already reads
-                    // env vars (PACKER_CRASH_AT). RTL_USER_PROCESS_PARAMETERS.Environment
-                    // is at +0x80 on x64; the block is double-NUL-terminated UTF-16.
+                    // The block is double-NUL-terminated UTF-16 "NAME=VALUE" entries.
                     const auto env = c.emu.read_memory<uint64_t>(params + 0x80);
                     if (env)
                     {
@@ -1089,6 +1090,14 @@ namespace sogen
                                 break; // double NUL -- end of block
                             }
                             c.win_emu.log.print(color::red, "[CHILDENV] %s\n", u16_to_u8(entry).c_str());
+
+                            // Split on the FIRST '=' only. Theia's values are raw
+                            // little-endian bytes biased by +0x100 so the block holds no
+                            // NULs, so a value can contain anything at all, '=' included.
+                            if (const auto eq = entry.find(u'='); eq != std::u16string::npos && eq > 0)
+                            {
+                                child_env.insert_or_assign(entry.substr(0, eq), entry.substr(eq + 1));
+                            }
                             entry.clear();
                         }
                     }
@@ -1159,22 +1168,6 @@ namespace sogen
                     }
                 }
 
-                // ---- Thread-based child (experiment) --------------------------------
-                // Theia spawns runtime.dll as a child process. Real multi-process support is
-                // a large feature, but two facts make a cheap probe possible:
-                //   * the child's RTL_USER_PROCESS_PARAMETERS (and therefore its environment,
-                //     carrying PACKER_SECTION / PACKER_FUNCTIONALITY) is built by the parent
-                //     and already lives in the PARENT's address space -- that is how we read
-                //     it above;
-                //   * PACKER_SECTION names handle 0x02000008, which is already valid in the
-                //     parent's handle table.
-                // So a thread started at runtime.dll's entry point can reach both without any
-                // shared memory or handle inheritance. Point the PEB at the child's parameter
-                // block first so env lookups resolve to the child's environment.
-                //
-                // If Theia accepts this, real child-process support is unnecessary. If it
-                // rejects it, the failure names the isolation property it actually needs
-                // (own PEB / own image base / uninitialised globals).
                 // Dump every live section's backing memory at spawn time. The child maps the
                 // PACKER_SECTION handle and then waits on its contents, so these bytes ARE
                 // the parent->child handshake payload. Capturing them here lets the child be
@@ -1215,38 +1208,59 @@ namespace sogen
                     }
                 }
 
-                bool spawned_thread = false;
-                const auto child_params = get_syscall_argument(c.emu, 8);
-                if (const auto* rt = c.win_emu.mod_manager.find_by_name("runtime.dll"); rt && child_params)
+                // ---- Real child process ---------------------------------------------
+                // A second, fully independent windows_emulator: its own address space, PEB,
+                // handle table and image base. Anything less (a thread at the child's entry
+                // point in the parent's address space) collides with the parent's already
+                // initialised runtime.dll globals and deadlocks on the loader lock.
+                //
+                // The environment is passed through verbatim so PACKER_SECTION /
+                // PACKER_FUNCTIONALITY arrive exactly as Theia wrote them.
+                if (image_path.starts_with(u"\\??\\"))
                 {
-                    auto peb = c.proc.peb64.read();
-                    const auto saved_params = peb.ProcessParameters;
-                    peb.ProcessParameters = child_params;
-                    c.proc.peb64.write(peb);
-
-                    const auto child_thread =
-                        c.proc.create_thread(c.win_emu.memory, rt->entry_point, 0, 0, 0);
-
-                    if (thread_handle.value())
-                    {
-                        thread_handle.write(child_thread);
-                    }
-
-                    spawned_thread = true;
-                    c.win_emu.log.print(color::green,
-                                        "[CHILDPROC] started thread-child at runtime.dll entry 0x%" PRIx64
-                                        " (RVA 0x%" PRIx64 "), PEB params -> 0x%" PRIx64 "\n",
-                                        rt->entry_point, rt->entry_point - rt->image_base, child_params);
-                    (void)saved_params; // deliberately left pointing at the child's block
+                    image_path.erase(0, 4); // NT device prefix; the child wants a Win32 path
                 }
 
-                c.win_emu.log.print(color::green, "[CHILDPROC] reporting PsCreateSuccess (%s)\n",
-                                    spawned_thread ? "thread-child running" : "inert handles only");
+                windows_emulator* child = nullptr;
+                if (!image_path.empty())
+                {
+                    child = c.win_emu.create_child_process(application_settings{
+                        .application = image_path,
+                        .environment = std::move(child_env),
+                    });
+                }
+
+                if (!child)
+                {
+                    // No backend factory (or no image path): behave exactly as before.
+                    c.win_emu.log.print(color::red, "[CHILDPROC] child not created -- inert handles only\n");
+                    return STATUS_SUCCESS;
+                }
+
+                // start() runs the child to completion, so the parent is frozen for its
+                // duration. Fine while the two sides don't yet share memory; interleaving
+                // comes with the shared-section work.
+                c.win_emu.log.print(color::green, "[CHILDPROC] ---- child emulator starting ----\n");
+                try
+                {
+                    child->start();
+                }
+                catch (const std::exception& e)
+                {
+                    c.win_emu.log.print(color::red, "[CHILDPROC] child aborted: %s\n", e.what());
+                }
+                c.win_emu.log.print(color::green, "[CHILDPROC] ---- child emulator stopped ----\n");
+
                 return STATUS_SUCCESS;
+            }
+            catch (const std::exception& e)
+            {
+                c.win_emu.log.print(color::red, "[CHILDPROC] failed -- falling back: %s\n", e.what());
+                return STATUS_NOT_SUPPORTED;
             }
             catch (...)
             {
-                c.win_emu.log.print(color::red, "[CHILDPROC] could not write out params -- falling back\n");
+                c.win_emu.log.print(color::red, "[CHILDPROC] failed -- falling back (non-standard exception)\n");
                 return STATUS_NOT_SUPPORTED;
             }
         }

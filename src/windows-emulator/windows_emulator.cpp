@@ -709,7 +709,8 @@ namespace sogen
 
     windows_emulator::windows_emulator(std::unique_ptr<x86_64_emulator> emu, const emulator_settings& settings,
                                        emulator_callbacks callbacks, emulator_interfaces interfaces)
-        : emu_(std::move(emu)),
+        : settings_(settings),
+          emu_(std::move(emu)),
           clock_(get_clock(interfaces, this->executed_instructions_, settings.use_relative_time)),
           dns_lookup_(get_dns_lookup(interfaces)),
           socket_factory_(get_socket_factory(interfaces)),
@@ -781,6 +782,39 @@ namespace sogen
     }
 
     windows_emulator::~windows_emulator() = default;
+
+    windows_emulator* windows_emulator::create_child_process(application_settings app_settings)
+    {
+        if (!this->callbacks.child_backend_factory)
+        {
+            return nullptr;
+        }
+
+        auto backend = this->callbacks.child_backend_factory();
+        if (!backend)
+        {
+            return nullptr;
+        }
+
+        // Headless, deliberately: SDL owns process-global state, so a child that built its
+        // own SDL backend would fight the parent for the window and the input queue.
+        emulator_interfaces interfaces{
+            .ui = std::make_unique<null_ui_backend>(),
+            .audio = std::make_unique<null_audio_backend>(),
+        };
+
+        auto child = std::make_unique<windows_emulator>(std::move(backend), std::move(app_settings), this->settings_,
+                                                        emulator_callbacks{}, std::move(interfaces));
+
+        auto* child_ptr = this->children_.emplace_back(std::move(child)).get();
+
+        if (this->callbacks.on_child_created)
+        {
+            this->callbacks.on_child_created(*child_ptr);
+        }
+
+        return child_ptr;
+    }
 
     void windows_emulator::setup_process_if_necessary()
     {

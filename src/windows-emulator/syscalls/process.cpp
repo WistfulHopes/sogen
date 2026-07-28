@@ -628,6 +628,10 @@ namespace sogen
 
             if (c.proc.is_current_process_handle(process_handle))
             {
+                // The exit status names the reason Theia gave up (0xDEAD is its own
+                // "handshake failed" code), so it is worth surfacing on every run.
+                c.win_emu.log.print(color::red, "[EXITPROC] NtTerminateProcess exit_status=0x%X\n",
+                                    static_cast<uint32_t>(exit_status));
                 c.proc.exit_status = exit_status;
                 c.win_emu.stop();
                 return STATUS_SUCCESS;

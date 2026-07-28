@@ -23,6 +23,7 @@ namespace sogen
 {
 
     struct io_device;
+    class windows_emulator;
 
     struct emulator_callbacks : module_manager::callbacks, process_context::callbacks
     {
@@ -49,6 +50,18 @@ namespace sogen
         opt_func<void(uint64_t address)> on_instruction{};
         opt_func<void(io_device& device, std::u16string_view device_name, ULONG code)> on_ioctrl{};
         opt_func<void(uint32_t fail_code)> on_fast_fail{};
+
+        // Creates the CPU backend for a child process. windows-emulator sits below
+        // backend-selection in the link graph and cannot construct one itself, so the
+        // consumer that picked the backend supplies this. Left null, NtCreateUserProcess
+        // reports STATUS_NOT_SUPPORTED and nothing else changes.
+        std::function<std::unique_ptr<x86_64_emulator>()> child_backend_factory{};
+
+        // Fired once a child emulator is constructed but before it runs, so a consumer can
+        // attach its own logging/analysis to it. Without this a child is nearly silent:
+        // syscall and module tracing live in the analyzer's callbacks, and a child starts
+        // with none.
+        std::function<void(windows_emulator& child)> on_child_created{};
     };
 
     struct application_settings
@@ -146,6 +159,10 @@ namespace sogen
 
         application_settings application_settings_{};
 
+        // Kept so child processes can be constructed with the same emulation root,
+        // registry, path/port mappings and timing knobs as their parent.
+        emulator_settings settings_{};
+
         std::unique_ptr<x86_64_emulator> emu_{};
         std::unique_ptr<utils::clock> clock_{};
         std::unique_ptr<network::dns_lookup> dns_lookup_{};
@@ -153,6 +170,11 @@ namespace sogen
         std::unique_ptr<ui_backend> ui_backend_{};
         std::unique_ptr<audio_backend> audio_backend_{};
         bool setup_completed_{false};
+
+        // Child processes spawned via NtCreateUserProcess. Each is a full emulator of its
+        // own; they must outlive the syscall handler that created them, so they are owned
+        // here rather than by the handler.
+        std::vector<std::unique_ptr<windows_emulator>> children_{};
 
       public:
         const std::filesystem::path emulation_root{};
@@ -238,6 +260,13 @@ namespace sogen
         {
             return *this->audio_backend_;
         }
+
+        // Spawns a child process as a second, independent emulator that inherits this
+        // one's settings but runs headless (SDL is process-global; a second live SDL
+        // backend would steal the parent's window and input). The child is owned by this
+        // emulator and outlives the syscall handler that created it. Returns nullptr when
+        // callbacks.child_backend_factory is unset, i.e. the consumer cannot make backends.
+        windows_emulator* create_child_process(application_settings app_settings);
 
         void handle_ui_event(const ui_event& event);
         void deliver_raw_input(const process_context::raw_input_payload& payload, hwnd explicit_target);

@@ -138,10 +138,11 @@ namespace sogen
             // C00000BB is STATUS_NOT_SUPPORTED, so report every syscall that returns it.
             {
                 const auto ret = emu.reg<uint64_t>(x86_register::rax);
-                // 0xC00000BB STATUS_NOT_SUPPORTED, 0xC000000B STATUS_INVALID_CID.
-                // Theia reports both verbatim in its own dialogs, so naming the syscall
-                // that produced one goes straight to the cause.
-                if (ret == 0xC00000BBull || ret == 0xC000000Bull)
+                // Any NT error status (severity 0b11). Theia reports several verbatim in its
+                // own dialogs, and the ones that matter are not just STATUS_NOT_SUPPORTED
+                // (0xC00000BB) / STATUS_INVALID_CID (0xC000000B) -- a child failing to map
+                // its inherited section returns STATUS_INVALID_HANDLE (0xC0000008).
+                if ((ret & 0xFFFFFFFFull) >= 0xC0000000ull && ret <= 0xFFFFFFFFull)
                 {
                     win_emu.log.print(color::red, "[FAILRET] %s (0x%X) returned 0x%" PRIx64 " at 0x%" PRIx64 "\n",
                                       entry->second.name.c_str(), syscall_id, ret, address);
