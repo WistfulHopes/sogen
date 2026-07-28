@@ -6190,6 +6190,11 @@ namespace sogen
         {
             return FALSE;
         }
+        
+        BOOL handle_NtUserShellHandwritingDelegateInput()
+        {
+            return FALSE;
+        }
     }
 
 } // namespace sogen
