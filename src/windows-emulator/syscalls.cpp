@@ -1159,7 +1159,49 @@ namespace sogen
                     }
                 }
 
-                c.win_emu.log.print(color::green, "[CHILDPROC] reporting PsCreateSuccess with inert child handles\n");
+                // ---- Thread-based child (experiment) --------------------------------
+                // Theia spawns runtime.dll as a child process. Real multi-process support is
+                // a large feature, but two facts make a cheap probe possible:
+                //   * the child's RTL_USER_PROCESS_PARAMETERS (and therefore its environment,
+                //     carrying PACKER_SECTION / PACKER_FUNCTIONALITY) is built by the parent
+                //     and already lives in the PARENT's address space -- that is how we read
+                //     it above;
+                //   * PACKER_SECTION names handle 0x02000008, which is already valid in the
+                //     parent's handle table.
+                // So a thread started at runtime.dll's entry point can reach both without any
+                // shared memory or handle inheritance. Point the PEB at the child's parameter
+                // block first so env lookups resolve to the child's environment.
+                //
+                // If Theia accepts this, real child-process support is unnecessary. If it
+                // rejects it, the failure names the isolation property it actually needs
+                // (own PEB / own image base / uninitialised globals).
+                bool spawned_thread = false;
+                const auto child_params = get_syscall_argument(c.emu, 8);
+                if (const auto* rt = c.win_emu.mod_manager.find_by_name("runtime.dll"); rt && child_params)
+                {
+                    auto peb = c.proc.peb64.read();
+                    const auto saved_params = peb.ProcessParameters;
+                    peb.ProcessParameters = child_params;
+                    c.proc.peb64.write(peb);
+
+                    const auto child_thread =
+                        c.proc.create_thread(c.win_emu.memory, rt->entry_point, 0, 0, 0);
+
+                    if (thread_handle.value())
+                    {
+                        thread_handle.write(child_thread);
+                    }
+
+                    spawned_thread = true;
+                    c.win_emu.log.print(color::green,
+                                        "[CHILDPROC] started thread-child at runtime.dll entry 0x%" PRIx64
+                                        " (RVA 0x%" PRIx64 "), PEB params -> 0x%" PRIx64 "\n",
+                                        rt->entry_point, rt->entry_point - rt->image_base, child_params);
+                    (void)saved_params; // deliberately left pointing at the child's block
+                }
+
+                c.win_emu.log.print(color::green, "[CHILDPROC] reporting PsCreateSuccess (%s)\n",
+                                    spawned_thread ? "thread-child running" : "inert handles only");
                 return STATUS_SUCCESS;
             }
             catch (...)

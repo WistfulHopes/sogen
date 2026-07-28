@@ -1,4 +1,6 @@
 #include "../std_include.hpp"
+
+#include <set>
 #include "../cpu_context.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
@@ -627,6 +629,20 @@ namespace sogen
 
         NTSTATUS handle_NtYieldExecution(const syscall_context& c)
         {
+            // DIAGNOSTIC: Theia's parent busy-waits here, and our thread-based "child" runs
+            // the same runtime.dll code, so the log alone cannot say which thread is
+            // spinning. Report each distinct thread id once so it is unambiguous whether the
+            // child ever gets scheduled.
+            if (c.vcpu.active_thread)
+            {
+                static std::set<uint32_t> seen_yield_tids;
+                const auto tid = c.vcpu.active_thread->id;
+                if (seen_yield_tids.insert(tid).second)
+                {
+                    c.win_emu.log.print(color::cyan, "[YIELD] first NtYieldExecution from tid %u\n", tid);
+                }
+            }
+
             c.win_emu.yield_thread(c.vcpu);
             return STATUS_SUCCESS;
         }
