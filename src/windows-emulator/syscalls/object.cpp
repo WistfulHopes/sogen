@@ -1,4 +1,6 @@
 #include "../std_include.hpp"
+
+#include <set>
 #include "../emulator_utils.hpp"
 #include "../io_completion_wait.hpp"
 #include "../syscall_utils.hpp"
@@ -769,6 +771,48 @@ namespace sogen
             }
 
             auto& t = c.thread();
+
+            // DIAGNOSTIC: the Theia packer child blocks in exactly one
+            // NtWaitForSingleObject while the parent spins - naming that object gives the
+            // synchronisation contract the two processes actually need. Report once per
+            // (thread, handle) pair so the spinning parent cannot drown it out.
+            {
+                static std::set<std::pair<uint32_t, uint64_t>> reported;
+                if (reported.emplace(t.id, resolved_handle.bits).second)
+                {
+                    const char* type_name = "?";
+                    std::string obj_name{};
+                    switch (resolved_handle.value.type)
+                    {
+                    case handle_types::event:
+                        type_name = "event";
+                        if (const auto* e = c.proc.events.get(resolved_handle))
+                        {
+                            obj_name = u16_to_u8(e->name);
+                        }
+                        break;
+                    case handle_types::mutant:
+                        type_name = "mutant";
+                        if (const auto* m = c.proc.mutants.get(resolved_handle))
+                        {
+                            obj_name = u16_to_u8(m->name);
+                        }
+                        break;
+                    case handle_types::semaphore:  type_name = "semaphore"; break;
+                    case handle_types::thread:     type_name = "thread"; break;
+                    case handle_types::process:    type_name = "process"; break;
+                    case handle_types::section:    type_name = "section"; break;
+                    case handle_types::timer:      type_name = "timer"; break;
+                    default: break;
+                    }
+
+                    c.win_emu.log.print(color::cyan,
+                                        "[WAITOBJ] tid %u waits on handle 0x%" PRIx64 " type=%s(%u) name='%s' alertable=%u\n",
+                                        t.id, resolved_handle.bits, type_name,
+                                        static_cast<uint32_t>(resolved_handle.value.type), obj_name.c_str(),
+                                        static_cast<uint32_t>(alertable));
+                }
+            }
 
             std::optional<LARGE_INTEGER> timeout_value{};
             const auto needs_deadline = timeout.value() && !t.await_time.has_value();
