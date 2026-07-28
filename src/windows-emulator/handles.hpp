@@ -622,6 +622,18 @@ namespace sogen
     constexpr uint32_t STEAM_FAKE_PROCESS_ID = 0x8B0;
     constexpr auto STEAM_PROCESS_HANDLE = make_pseudo_handle(0x1, handle_types::process);
 
+    // Synthetic "packer child" process/thread. Theia spawns runtime.dll as a real child
+    // process during init (NtCreateUserProcess, image == cmdline == runtime.dll, which is
+    // an EXE despite the extension). sogen has no child-process support, so it stubbed the
+    // call with STATUS_NOT_SUPPORTED -- and Theia reports that verbatim
+    // ("The program encountered C00000BB ... during initialization") and aborts.
+    //
+    // These give it handles that read as a live-but-inert process, the same trick already
+    // used for the synthetic Steam process, so init can proceed far enough to observe what
+    // Theia actually expects the child to do.
+    constexpr auto PACKER_CHILD_PROCESS_HANDLE = make_pseudo_handle(0x2, handle_types::process);
+    constexpr auto PACKER_CHILD_THREAD_HANDLE = make_pseudo_handle(0x2, handle_types::thread);
+
     constexpr auto CURRENT_PROCESS = make_handle(~0ULL);
     constexpr auto CURRENT_THREAD = make_handle(~1ULL);
 

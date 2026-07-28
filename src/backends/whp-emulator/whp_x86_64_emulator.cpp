@@ -1,4 +1,7 @@
 #define WHP_EMULATOR_IMPL
+#pragma warning(push)
+#pragma warning(disable : 4324)
+
 #include "whp_x86_64_emulator.hpp"
 
 #include <WinHvPlatform.h>
@@ -7,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <iomanip>
 #include <limits>
@@ -3412,10 +3416,32 @@ namespace sogen::whp
                 {
                 case x86_hookable_instructions::cpuid: {
                     const auto& cpuid = exit_context.CpuidAccess;
-                    vcpu.reg(x86_register::rax, static_cast<uint64_t>(cpuid.DefaultResultRax));
-                    vcpu.reg(x86_register::rbx, static_cast<uint64_t>(cpuid.DefaultResultRbx));
-                    vcpu.reg(x86_register::rcx, static_cast<uint64_t>(cpuid.DefaultResultRcx));
-                    vcpu.reg(x86_register::rdx, static_cast<uint64_t>(cpuid.DefaultResultRdx));
+                    const auto leaf = static_cast<uint32_t>(cpuid.Rax);
+
+                    auto result_rax = cpuid.DefaultResultRax;
+                    auto result_rbx = cpuid.DefaultResultRbx;
+                    auto result_rcx = cpuid.DefaultResultRcx;
+                    auto result_rdx = cpuid.DefaultResultRdx;
+
+                    if (leaf == 1)
+                    {
+                        result_rcx &= ~(1u << 31); // hide the hypervisor-present bit (CPUID.1:ECX[31])
+                    }
+                    else if (leaf >= 0x40000000 && leaf <= 0x400000ff)
+                    {
+                        // Under WHP the host Hyper-V partition answers these synthetic leaves with
+                        // "Microsoft Hv"; zero them so the guest sees no hypervisor vendor signature.
+                        result_rax = result_rbx = result_rcx = result_rdx = 0;
+                    }
+
+                    if (leaf == 1 || leaf >= 0x40000000)
+                    {
+                    }
+
+                    vcpu.reg(x86_register::rax, static_cast<uint64_t>(result_rax));
+                    vcpu.reg(x86_register::rbx, static_cast<uint64_t>(result_rbx));
+                    vcpu.reg(x86_register::rcx, static_cast<uint64_t>(result_rcx));
+                    vcpu.reg(x86_register::rdx, static_cast<uint64_t>(result_rdx));
                     break;
                 }
                 case x86_hookable_instructions::rdtsc:
@@ -3966,3 +3992,5 @@ namespace sogen::whp
         return std::make_unique<whp_x86_64_emulator>(vcpu_count);
     }
 } // namespace sogen::whp
+
+#pragma warning(pop)

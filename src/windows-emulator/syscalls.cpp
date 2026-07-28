@@ -1036,9 +1036,137 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtCreateUserProcess()
+        NTSTATUS handle_NtCreateUserProcess(const syscall_context& c)
         {
-            return STATUS_NOT_SUPPORTED;
+            // Theia spawns a child process during init. sogen has no child-process support,
+            // so this returns STATUS_NOT_SUPPORTED (0xC00000BB) -- which is exactly the code
+            // Theia then reports: "The program encountered C00000BB ... during
+            // initialization." Log WHAT it is trying to spawn, since that decides whether we
+            // need real child support or can satisfy it some cheaper way.
+            //
+            // NtCreateUserProcess arg 9 (index 8) is PRTL_USER_PROCESS_PARAMETERS:
+            //   +0x60 ImagePathName (UNICODE_STRING)   +0x70 CommandLine (UNICODE_STRING)
+            try
+            {
+                const auto params = get_syscall_argument(c.emu, 8);
+                if (params)
+                {
+                    const auto read_ustr = [&](const uint64_t addr) -> std::string {
+                        const auto length = c.emu.read_memory<uint16_t>(addr);
+                        const auto buffer = c.emu.read_memory<uint64_t>(addr + 8);
+                        if (!length || !buffer || length > 0x1000)
+                        {
+                            return {};
+                        }
+                        std::u16string str(length / sizeof(char16_t), u'\0');
+                        c.emu.read_memory(buffer, str.data(), length);
+                        return u16_to_u8(str);
+                    };
+
+                    c.win_emu.log.print(color::red, "[CHILDPROC] image='%s' cmdline='%s'\n",
+                                        read_ustr(params + 0x60).c_str(), read_ustr(params + 0x70).c_str());
+
+                    // The PS_ATTRIBUTE_LIST carries only the image name -- no handle list,
+                    // no client id, no token. So whatever marks this child as legitimate
+                    // (rather than "You aren't supposed to be here") must travel another
+                    // way. The environment block is the prime suspect: Theia already reads
+                    // env vars (PACKER_CRASH_AT). RTL_USER_PROCESS_PARAMETERS.Environment
+                    // is at +0x80 on x64; the block is double-NUL-terminated UTF-16.
+                    const auto env = c.emu.read_memory<uint64_t>(params + 0x80);
+                    if (env)
+                    {
+                        std::u16string entry;
+                        for (uint64_t off = 0; off < 0x8000; off += 2)
+                        {
+                            const auto ch = c.emu.read_memory<char16_t>(env + off);
+                            if (ch)
+                            {
+                                entry.push_back(ch);
+                                continue;
+                            }
+                            if (entry.empty())
+                            {
+                                break; // double NUL -- end of block
+                            }
+                            c.win_emu.log.print(color::red, "[CHILDENV] %s\n", u16_to_u8(entry).c_str());
+                            entry.clear();
+                        }
+                    }
+                }
+            }
+            catch (...)
+            {
+                c.win_emu.log.print(color::red, "[CHILDPROC] <could not read process parameters>\n");
+            }
+
+            // Report success with an inert child. PS_CREATE_INFO (x64):
+            //   +0x00 SIZE_T Size
+            //   +0x08 PS_CREATE_STATE State   (PsCreateSuccess == 6)
+            // The caller checks State before reading the SuccessState union, so setting
+            // Size/State and handing back handles is the minimum that looks like a success.
+            try
+            {
+                const emulator_object<handle> process_handle{c.emu, get_syscall_argument(c.emu, 0)};
+                const emulator_object<handle> thread_handle{c.emu, get_syscall_argument(c.emu, 1)};
+                if (process_handle.value())
+                {
+                    process_handle.write(PACKER_CHILD_PROCESS_HANDLE);
+                }
+                if (thread_handle.value())
+                {
+                    thread_handle.write(PACKER_CHILD_THREAD_HANDLE);
+                }
+
+                const auto create_info = get_syscall_argument(c.emu, 9);
+                if (create_info)
+                {
+                    constexpr uint32_t ps_create_success = 6;
+                    c.emu.write_memory<uint32_t>(create_info + 0x08, ps_create_success);
+                }
+
+                // Dump the PS_ATTRIBUTE_LIST (arg 11 / index 10). This is the actual
+                // parent->child interface, so we need it before real child support can be
+                // written: it carries the image name, client id, and any INHERITED HANDLE
+                // LIST the child uses to find its parent's objects.
+                //   PS_ATTRIBUTE_LIST { SIZE_T TotalLength; PS_ATTRIBUTE Attributes[]; }
+                //   PS_ATTRIBUTE      { ULONG_PTR Attribute; SIZE_T Size; ULONG_PTR Value;
+                //                       PSIZE_T ReturnLength; }   // 0x20 bytes each
+                const auto attr_list = get_syscall_argument(c.emu, 10);
+                if (attr_list)
+                {
+                    const auto total = c.emu.read_memory<uint64_t>(attr_list);
+                    const auto count = (total > 8 && total < 0x1000) ? (total - 8) / 0x20 : 0;
+                    c.win_emu.log.print(color::green, "[CHILDATTR] list @0x%" PRIx64 " total=%" PRIu64 " -> %" PRIu64 " attribute(s)\n",
+                                        attr_list, total, count);
+                    for (uint64_t i = 0; i < count; ++i)
+                    {
+                        const auto base = attr_list + 8 + i * 0x20;
+                        const auto attribute = c.emu.read_memory<uint64_t>(base);
+                        const auto size = c.emu.read_memory<uint64_t>(base + 8);
+                        const auto value = c.emu.read_memory<uint64_t>(base + 16);
+                        c.win_emu.log.print(color::green, "[CHILDATTR]   num=0x%02" PRIx64 " flags=0x%" PRIx64 " size=%" PRIu64 " value=0x%" PRIx64 "\n",
+                                            attribute & 0xFFFF, attribute >> 16, size, value);
+                        // A HANDLE_LIST attribute points at an array of handles being
+                        // inherited; those are how the child reaches the parent's objects.
+                        if ((attribute & 0xFFFF) == 0x0B && value && size <= 0x200)
+                        {
+                            for (uint64_t k = 0; k * 8 < size; ++k)
+                            {
+                                const auto h = c.emu.read_memory<uint64_t>(value + k * 8);
+                                c.win_emu.log.print(color::green, "[CHILDATTR]     inherited handle[%" PRIu64 "] = 0x%" PRIx64 "\n", k, h);
+                            }
+                        }
+                    }
+                }
+
+                c.win_emu.log.print(color::green, "[CHILDPROC] reporting PsCreateSuccess with inert child handles\n");
+                return STATUS_SUCCESS;
+            }
+            catch (...)
+            {
+                c.win_emu.log.print(color::red, "[CHILDPROC] could not write out params -- falling back\n");
+                return STATUS_NOT_SUPPORTED;
+            }
         }
 
         NTSTATUS handle_NtCreateDebugObject()

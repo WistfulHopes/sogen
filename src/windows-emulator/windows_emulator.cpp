@@ -1070,6 +1070,70 @@ namespace sogen
             {
                 this->install_section_first_execution_hook(mod, i);
             }
+
+            // ---- Theia clean-DLL hook-sweep diagnostic -------------------------------
+            // Theia maps pristine copies of ntdll/kernel32/kernelbase/user32/gdi32 from
+            // \KnownDlls and diffs them against the already-loaded copies to detect
+            // inline hooks. Under emulation it finds a difference and bails with a
+            // MessageBox. When a SECOND copy of an already-loaded module appears, diff
+            // the two .text sections here and report exactly what Theia is seeing.
+            for (auto& [base, other] : this->mod_manager.modules())
+            {
+                if (base == mod.image_base || other.name != mod.name)
+                {
+                    continue;
+                }
+
+                const auto text_of = [](const mapped_module& m) -> const mapped_section* {
+                    for (const auto& sec : m.sections)
+                    {
+                        if (sec.name == ".text")
+                        {
+                            return &sec;
+                        }
+                    }
+                    return nullptr;
+                };
+
+                const auto* a = text_of(other);
+                const auto* b = text_of(mod);
+                if (!a || !b)
+                {
+                    continue;
+                }
+
+                const auto size = std::min(a->region.length, b->region.length);
+                std::vector<uint8_t> buf_a(size), buf_b(size);
+                try
+                {
+                    this->emu().read_memory(a->region.start, buf_a.data(), size);
+                    this->emu().read_memory(b->region.start, buf_b.data(), size);
+                }
+                catch (...)
+                {
+                    continue;
+                }
+
+                size_t diffs = 0;
+                this->log.print(color::yellow, "[HOOKSWEEP] %s: loaded 0x%" PRIx64 " vs clean 0x%" PRIx64 " (.text %zu bytes)\n",
+                                mod.name.c_str(), a->region.start, b->region.start, size);
+                for (size_t i = 0; i < size; ++i)
+                {
+                    if (buf_a[i] == buf_b[i])
+                    {
+                        continue;
+                    }
+                    if (++diffs <= 12)
+                    {
+                        this->log.print(color::yellow,
+                                        "[HOOKSWEEP]   +0x%zx loaded %02x %02x %02x %02x | clean %02x %02x %02x %02x\n", i,
+                                        buf_a[i], i + 1 < size ? buf_a[i + 1] : 0, i + 2 < size ? buf_a[i + 2] : 0,
+                                        i + 3 < size ? buf_a[i + 3] : 0, buf_b[i], i + 1 < size ? buf_b[i + 1] : 0,
+                                        i + 2 < size ? buf_b[i + 2] : 0, i + 3 < size ? buf_b[i + 3] : 0);
+                    }
+                }
+                this->log.print(color::yellow, "[HOOKSWEEP] %s: %zu differing bytes in .text\n", mod.name.c_str(), diffs);
+            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {

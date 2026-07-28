@@ -548,7 +548,7 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
 
             default:
-                c.win_emu.log.error("Wait handle type not supported: %u\n", static_cast<uint32_t>(h.value.type));
+                c.win_emu.log.error("Wait handle type not supported: %u (raw 0x%llx, pseudo=%u, id=%u)\n", static_cast<uint32_t>(h.value.type), static_cast<unsigned long long>(h.bits), static_cast<uint32_t>(h.value.is_pseudo), static_cast<uint32_t>(h.value.id));
                 return STATUS_INVALID_HANDLE;
             }
         }
