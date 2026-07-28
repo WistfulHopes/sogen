@@ -1,4 +1,6 @@
 #include "std_include.hpp"
+
+#include <set>
 #include "windows_emulator.hpp"
 
 #include "cpu_context.hpp"
@@ -513,6 +515,21 @@ namespace sogen
             const auto is_ready = thread.is_thread_ready(win_emu);
             const auto has_pending_status = thread.pending_status.has_value();
             const auto can_dispatch_apcs = thread.apc_alertable && !thread.pending_apcs.empty();
+
+            // DIAGNOSTIC: report the scheduling decision once per thread. Our synthetic
+            // Theia "child" thread is created but never observed running, and this is the
+            // gate that would reject it.
+            {
+                static std::set<uint32_t> reported;
+                if (reported.insert(thread.id).second)
+                {
+                    win_emu.log.print(color::cyan,
+                                      "[SCHED] tid %u: ready=%d terminated=%d suspended=%u pending_status=%d apcs=%d -> %s\n",
+                                      thread.id, is_ready ? 1 : 0, thread.is_terminated() ? 1 : 0, thread.suspended,
+                                      has_pending_status ? 1 : 0, can_dispatch_apcs ? 1 : 0,
+                                      (!is_ready && !force && !can_dispatch_apcs) ? "REJECTED" : "scheduled");
+                }
+            }
 
             if (!is_ready && !force && !can_dispatch_apcs)
             {
