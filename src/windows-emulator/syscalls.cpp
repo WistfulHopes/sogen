@@ -1175,6 +1175,46 @@ namespace sogen
                 // If Theia accepts this, real child-process support is unnecessary. If it
                 // rejects it, the failure names the isolation property it actually needs
                 // (own PEB / own image base / uninitialised globals).
+                // Dump every live section's backing memory at spawn time. The child maps the
+                // PACKER_SECTION handle and then waits on its contents, so these bytes ARE
+                // the parent->child handshake payload. Capturing them here lets the child be
+                // run standalone with a pre-filled section, instead of emulating both.
+                {
+                    int idx = 0;
+                    for (auto& [sec_handle, sec] : c.proc.sections)
+                    {
+                        if (!sec.backing_address)
+                        {
+                            continue;
+                        }
+                        const auto size = static_cast<size_t>(std::min<uint64_t>(sec.maximum_size, 0x100000));
+                        std::vector<uint8_t> buf(size);
+                        try
+                        {
+                            c.emu.read_memory(sec.backing_address, buf.data(), size);
+                        }
+                        catch (...)
+                        {
+                            continue;
+                        }
+                        size_t nonzero = 0;
+                        for (const auto b : buf)
+                        {
+                            nonzero += (b != 0);
+                        }
+                        char path[256];
+                        sprintf(path, "C:\\dev\\tokon\\dumps\\packer_section_%d.bin", idx++);
+                        if (FILE* f = fopen(path, "wb"))
+                        {
+                            fwrite(buf.data(), 1, size, f);
+                            fclose(f);
+                        }
+                        c.win_emu.log.print(color::green,
+                                            "[SECDUMP] handle=0x%" PRIx64 " backing=0x%" PRIx64 " size=%zu nonzero=%zu -> %s\n",
+                                            static_cast<uint64_t>(sec_handle), sec.backing_address, size, nonzero, path);
+                    }
+                }
+
                 bool spawned_thread = false;
                 const auto child_params = get_syscall_argument(c.emu, 8);
                 if (const auto* rt = c.win_emu.mod_manager.find_by_name("runtime.dll"); rt && child_params)
