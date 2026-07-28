@@ -871,6 +871,12 @@ namespace sogen
                 vcpu.switch_thread = needed_switch;
                 return false;
             }
+
+            if (this->idle_budget_target_ && this->executed_instructions_ >= *this->idle_budget_target_)
+            {
+                vcpu.switch_thread = needed_switch;
+                return false;
+            }
         }
 
         return true;
@@ -1296,6 +1302,8 @@ namespace sogen
         const auto use_count = count > 0;
         const auto start_instructions = this->executed_instructions_;
         const auto target_instructions = start_instructions + count;
+
+        this->idle_budget_target_ = use_count ? std::optional<uint64_t>{target_instructions} : std::nullopt;
 
         std::mutex interrupt_mutex{};
         std::condition_variable interrupt_cond{};
