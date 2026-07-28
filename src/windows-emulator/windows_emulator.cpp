@@ -885,8 +885,46 @@ namespace sogen
                 this->memory.read_memory(parent_section->backing_address, backing->data(), size);
                 this->memory.release_memory(parent_section->backing_address, size);
 
-                if (!this->memory.allocate_host_memory(parent_section->backing_address, size, backing->data(),
-                                                       map_nt_to_emulator_protection(parent_section->section_page_protection)))
+                const auto address = parent_section->backing_address;
+
+                // DIAGNOSTIC: trapping the parent's view instead of aliasing it reveals which
+                // offsets it actually polls while its child waits on a reply. Slower, but the
+                // parent only touches a handful of bytes here.
+                if (getenv("SOGEN_TRACE_SHARED_SECTION"))
+                {
+                    auto* buffer = backing.get();
+                    auto& logger = this->log;
+
+                    const auto trace = [address, buffer, &logger](const uint64_t addr, const size_t size, const bool write,
+                                                               const void* data) {
+                        static std::set<std::pair<uint64_t, bool>> seen;
+                        const auto offset = addr - address;
+                        if (seen.emplace(offset, write).second)
+                        {
+                            uint64_t value = 0;
+                            memcpy(&value, data, std::min<size_t>(size, sizeof(value)));
+                            logger.print(color::pink, "[SECTRACE] parent %s offset 0x%" PRIx64 " size %zu value 0x%" PRIx64 "\n",
+                                      write ? "WRITE" : "read ", offset, size, value);
+                        }
+                    };
+
+                    if (!this->memory.allocate_mmio(
+                            address, size,
+                            [buffer, address, trace](const uint64_t addr, void* data, const size_t size) {
+                                memcpy(data, buffer->data() + (addr - address), size);
+                                trace(addr, size, false, data);
+                            },
+                            [buffer, address, trace](const uint64_t addr, const void* data, const size_t size) {
+                                memcpy(buffer->data() + (addr - address), data, size);
+                                trace(addr, size, true, data);
+                            }))
+                    {
+                        this->shared_section_backings.erase(index);
+                        return false;
+                    }
+                }
+                else if (!this->memory.allocate_host_memory(address, size, backing->data(),
+                                                            map_nt_to_emulator_protection(parent_section->section_page_protection)))
                 {
                     this->shared_section_backings.erase(index);
                     return false;
