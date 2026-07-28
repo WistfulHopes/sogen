@@ -807,8 +807,8 @@ namespace sogen
                     }
 
                     c.win_emu.log.print(color::cyan,
-                                        "[WAITOBJ] tid %u waits on handle 0x%" PRIx64 " type=%s(%u) name='%s' alertable=%u\n",
-                                        t.id, resolved_handle.bits, type_name,
+                                        "[WAITOBJ] tid %u waits on raw=0x%" PRIx64 " resolved=0x%" PRIx64 " type=%s(%u) name='%s' alertable=%u\n",
+                                        t.id, h.bits, resolved_handle.bits, type_name,
                                         static_cast<uint32_t>(resolved_handle.value.type), obj_name.c_str(),
                                         static_cast<uint32_t>(alertable));
                 }

@@ -136,10 +136,16 @@ namespace sogen
             // DIAGNOSTIC: Theia aborts init with a message box reading
             // "The program encountered C00000BB at 0159421E during initialization."
             // C00000BB is STATUS_NOT_SUPPORTED, so report every syscall that returns it.
-            if (emu.reg<uint64_t>(x86_register::rax) == 0xC00000BBull)
             {
-                win_emu.log.print(color::red, "[NOTSUP] %s (0x%X) returned STATUS_NOT_SUPPORTED at 0x%" PRIx64 "\n",
-                                  entry->second.name.c_str(), syscall_id, address);
+                const auto ret = emu.reg<uint64_t>(x86_register::rax);
+                // 0xC00000BB STATUS_NOT_SUPPORTED, 0xC000000B STATUS_INVALID_CID.
+                // Theia reports both verbatim in its own dialogs, so naming the syscall
+                // that produced one goes straight to the cause.
+                if (ret == 0xC00000BBull || ret == 0xC000000Bull)
+                {
+                    win_emu.log.print(color::red, "[FAILRET] %s (0x%X) returned 0x%" PRIx64 " at 0x%" PRIx64 "\n",
+                                      entry->second.name.c_str(), syscall_id, ret, address);
+                }
             }
 
             dispatch_callback(win_emu, entry->second.name);
