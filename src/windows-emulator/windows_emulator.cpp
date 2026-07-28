@@ -20,6 +20,9 @@ namespace sogen
     constexpr auto MAX_INSTRUCTIONS_PER_TIME_SLICE = 0x20000;
     constexpr auto MAX_BASIC_BLOCKS_PER_TIME_SLICE = 0x8000;
 
+    // EFLAGS.TF
+    constexpr uint64_t trap_flag = 0x100;
+
     namespace
     {
         void adjust_working_directory(application_settings& app_settings)
@@ -931,6 +934,13 @@ namespace sogen
     {
         auto& thread = vcpu.thread();
 
+        if (thread.pending_trap_flag_restore)
+        {
+            thread.pending_trap_flag_restore = false;
+            const auto flags = vcpu.cpu.reg<uint64_t>(x86_register::rflags);
+            vcpu.cpu.reg(x86_register::rflags, flags | trap_flag);
+        }
+
         if (!thread.callback_stack.empty() && address == this->process.zw_callback_return)
         {
             thread.callback_return_rax = vcpu.cpu.reg<uint64_t>(x86_register::rax);
@@ -1091,6 +1101,17 @@ namespace sogen
             auto& vcpu = this->vcpu(cpu.index());
             const scoped_dispatch dispatch(*this, vcpu);
             this->dispatcher.dispatch(*this, vcpu);
+            if (!cpu.masks_trap_flag_on_syscall() && this->uses_instruction_precision())
+            {
+                auto& acting = vcpu.cpu;
+                const auto flags = acting.reg<uint64_t>(x86_register::rflags);
+                if (flags & trap_flag)
+                {
+                    acting.reg(x86_register::rflags, flags & ~trap_flag);
+                    vcpu.thread().pending_trap_flag_restore = true;
+                }
+            }
+
             return instruction_hook_continuation::skip_instruction;
         });
 

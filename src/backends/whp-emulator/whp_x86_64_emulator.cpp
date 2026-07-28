@@ -1173,6 +1173,11 @@ namespace sogen::whp
                 return true;
             }
 
+            bool masks_trap_flag_on_syscall() const override
+            {
+                return true;
+            }
+
             WHV_REGISTER_VALUE get_register(const WHV_REGISTER_NAME name) const
             {
                 WHV_REGISTER_VALUE value{};
@@ -1857,6 +1862,11 @@ namespace sogen::whp
             }
 
             bool is_stop_thread_safe() const override
+            {
+                return true;
+            }
+
+            bool masks_trap_flag_on_syscall() const override
             {
                 return true;
             }
