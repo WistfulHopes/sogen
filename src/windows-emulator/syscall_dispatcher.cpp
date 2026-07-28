@@ -90,10 +90,6 @@ namespace sogen
         {
             if (entry == this->handlers_.end())
             {
-                win_emu.log.error("Unknown syscall: 0x%X (raw: 0x%X)\n", syscall_id, raw_syscall_id);
-                win_emu.record_stop(stop_reason::unknown_syscall, "0x" + utils::string::to_hex_number(syscall_id));
-                c.emu.reg<uint64_t>(x86_register::rax, STATUS_NOT_SUPPORTED);
-                win_emu.stop();
                 win_emu.log.error("Invalid syscall id: 0x%X (raw: 0x%X)\n", syscall_id, raw_syscall_id);
                 win_emu.callbacks.on_suspicious_activity("Invalid syscall id");
                 c.emu.reg<uint64_t>(x86_register::rax, STATUS_INVALID_SYSTEM_SERVICE);
@@ -146,14 +142,15 @@ namespace sogen
 
         if (context.instrumentation_callback != 0 && syscall_name != "NtContinue")
         {
+            constexpr uint64_t syscall_instruction_size = 2;
+
             auto rip_old = emu.reg<uint64_t>(x86_register::rip);
 
             // The increase in RIP caused by executing the syscall here has not yet occurred.
             // If RIP is set directly, it will lead to an incorrect address, so the length of
             // the syscall instruction needs to be subtracted.
-            emu.reg<uint64_t>(x86_register::rip, context.instrumentation_callback - 2);
-
-            emu.reg<uint64_t>(x86_register::r10, rip_old);
+            emu.reg<uint64_t>(x86_register::rip, context.instrumentation_callback - syscall_instruction_size);
+            emu.reg<uint64_t>(x86_register::r10, rip_old + syscall_instruction_size);
         }
     }
 
