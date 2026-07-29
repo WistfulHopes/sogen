@@ -1311,6 +1311,10 @@ namespace sogen
                 static constexpr site sites[] = {
                     {0x1559246, "container (sub_201559147)"},
                     {0x159585D, "page fault (sub_20159552B)"},
+                    // Control: the tripwire, which the #DB trace proves executes in both
+                    // processes. If this fires and the two cipher sites do not, they are
+                    // genuinely unreached rather than unhooked.
+                    {0x898384, "CONTROL tripwire (known to execute)"},
                 };
 
             // SOGEN_LDRNAME=1 -- Theia's dumper calls GetModuleHandleW/LdrGetDllHandle and then
