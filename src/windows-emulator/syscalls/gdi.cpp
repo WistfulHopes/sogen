@@ -2810,11 +2810,32 @@ namespace sogen
                                     try
                                     {
                                         const auto v = c.emu.read_memory<uint64_t>(rsp + i * 8);
-                                        if (v >= lo && v < hi)
+                                        if (v < lo || v >= hi)
                                         {
-                                            c.win_emu.log.print(color::red, "[TAMPER]   +0x%03" PRIx64 "  0x%" PRIx64 "  RVA 0x%" PRIx64 "\n",
-                                                                i * 8, v, v - lo);
+                                            continue;
                                         }
+
+                                        // Most stack slots inside the module range are data
+                                        // pointers, not frames. A real return address always
+                                        // has a call ending exactly at it, so require one:
+                                        // E8 rel32 (5 bytes) or FF /2 in its common encodings.
+                                        std::array<uint8_t, 7> prev{};
+                                        c.emu.read_memory(v - prev.size(), prev.data(), prev.size());
+
+                                        const bool call_rel32 = prev[2] == 0xE8;
+                                        const bool call_indirect =
+                                            (prev[5] == 0xFF && (prev[6] >> 3 & 7) == 2) ||     // ff /2, 2 bytes
+                                            (prev[4] == 0xFF && (prev[5] >> 3 & 7) == 2) ||     // ff /2 + modrm byte
+                                            (prev[0] == 0xFF && (prev[1] >> 3 & 7) == 2);       // ff /2 + disp32
+
+                                        if (!call_rel32 && !call_indirect)
+                                        {
+                                            continue;
+                                        }
+
+                                        c.win_emu.log.print(color::red,
+                                                            "[TAMPER]   +0x%03" PRIx64 "  0x%" PRIx64 "  RVA 0x%" PRIx64 "  (%s)\n",
+                                                            i * 8, v, v - lo, call_rel32 ? "call rel32" : "call indirect");
                                     }
                                     catch (...)
                                     {
