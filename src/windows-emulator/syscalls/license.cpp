@@ -64,20 +64,40 @@ namespace sogen
                 }
 
                 const auto blob = product_policy->data;
+
+                // Every STATUS_UNSUCCESSFUL below reaches Theia as HRESULT 0x8007001F
+                // (RtlNtStatusToDosError -> ERROR_GEN_FAILURE), which is exactly the code its
+                // dumper reports. Name which check rejects the blob rather than inferring it.
+                const bool policy_debug = getenv("SOGEN_POLICY_DEBUG") != nullptr;
+
                 if (blob.size() < sizeof(product_policy_header))
                 {
+                    if (policy_debug)
+                    {
+                        c.win_emu.log.print(color::pink, "[POLICY] blob too small: %zu < %zu\n", blob.size(),
+                                            sizeof(product_policy_header));
+                    }
                     return STATUS_UNSUCCESSFUL;
                 }
 
                 product_policy_header header{};
                 if (!read_struct(blob, 0, header))
                 {
+                    if (policy_debug)
+                    {
+                        c.win_emu.log.print(color::pink, "[POLICY] header read failed (blob %zu)\n", blob.size());
+                    }
                     return STATUS_UNSUCCESSFUL;
                 }
 
                 constexpr size_t header_size = sizeof(product_policy_header);
                 if (header.data_size > blob.size() - header_size)
                 {
+                    if (policy_debug)
+                    {
+                        c.win_emu.log.print(color::pink, "[POLICY] data_size %u > blob %zu - header %zu\n",
+                                            static_cast<unsigned>(header.data_size), blob.size(), header_size);
+                    }
                     return STATUS_UNSUCCESSFUL;
                 }
 
