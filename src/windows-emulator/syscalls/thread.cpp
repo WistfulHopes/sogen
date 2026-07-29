@@ -684,7 +684,31 @@ namespace sogen
                     return enabled && enabled[0] == '1';
                 }();
 
-                if (watch_section && request_pending)
+                if (watch_section)
+                {
+                    // A watch hit reports the mailbox as it was BEFORE the faulting write; this
+                    // reports it again afterwards, so the pair brackets the parent's write.
+                    for (auto& [watch_base, watch] : c.win_emu.watched_sections_)
+                    {
+                        if (!watch.report_after)
+                        {
+                            continue;
+                        }
+
+                        watch.report_after = false;
+
+                        std::array<uint8_t, 8> after{};
+                        if (c.win_emu.memory.try_read_memory(watch_base, after.data(), after.size()))
+                        {
+                            c.win_emu.log.print(color::pink, "[WATCH] post=%02x %02x %02x %02x %02x %02x %02x %02x\n", after[0],
+                                                after[1], after[2], after[3], after[4], after[5], after[6], after[7]);
+                        }
+                    }
+                }
+
+                // Armed regardless of request_pending: whether the parent touches the mailbox
+                // BEFORE the child posts is exactly what says which side is meant to move first.
+                if (watch_section)
                 {
                     static uint64_t rearm = 0;
                     if ((++rearm % 64) == 0)

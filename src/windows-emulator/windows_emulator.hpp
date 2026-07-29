@@ -343,9 +343,12 @@ namespace sogen
             size_t length{};
             nt_memory_permission original{};
             bool armed{};
+            bool report_after{};
         };
 
         std::map<uint64_t, section_watch> watched_sections_{};
+
+      public:
 
         // Makes the next access to `address`..+length fault once so it can be attributed.
         void arm_section_watch(uint64_t address, size_t length);
