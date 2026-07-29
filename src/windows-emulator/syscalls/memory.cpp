@@ -162,8 +162,11 @@ namespace sogen
             static const bool qvm_debug = getenv("SOGEN_QVM_DEBUG") != nullptr;
             if (qvm_debug)
             {
-                c.win_emu.log.print(color::cyan, "[QVM] class=%u addr=0x%" PRIx64 " len=0x%" PRIx64 "\n",
-                                    static_cast<unsigned>(info_class), base_address, memory_information_length);
+                c.win_emu.log.print(color::cyan,
+                                    "[QVM] h=0x%" PRIx64 " cur=%d parent=0x%" PRIx64 " class=%u addr=0x%" PRIx64 "\n",
+                                    process_handle.bits, c.proc.is_current_process_handle(process_handle) ? 1 : 0,
+                                    static_cast<uint64_t>(REMOTE_PARENT_PROCESS_HANDLE.bits),
+                                    static_cast<unsigned>(info_class), base_address);
             }
 
             // A dumper walks its target's address space with MemoryBasicInformation before
