@@ -234,10 +234,26 @@ namespace sogen
 
             if (info_class == MemoryImageExtensionInformation)
             {
-                c.win_emu.log.error("NtQueryVirtualMemory: MemoryImageExtensionInformation not implemented (base 0x%" PRIx64
-                                    ")\n",
-                                    base_address);
-                return STATUS_NOT_SUPPORTED;
+                constexpr uint64_t struct_size = 24;
+                if (return_length)
+                {
+                    return_length.write(struct_size);
+                }
+                if (memory_information_length < struct_size)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                const auto* mod = base_address == 0 ? c.win_emu.mod_manager.executable
+                                                    : c.win_emu.mod_manager.find_by_address(base_address);
+                if (!mod)
+                {
+                    return STATUS_INVALID_ADDRESS;
+                }
+
+                const std::array<uint8_t, 24> empty{};
+                c.emu.write_memory(memory_information, empty.data(), empty.size());
+                return STATUS_SUCCESS;
             }
 
             if (base_address < MIN_ALLOCATION_ADDRESS || base_address >= MAX_ALLOCATION_END_EXCL)
