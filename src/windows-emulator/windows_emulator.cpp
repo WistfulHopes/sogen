@@ -1358,7 +1358,14 @@ namespace sogen
             //
             // Init decrypts pages just to run (the game exe's .text ships as ciphertext), so
             // this fires long before any pak is opened -- it does not need the game to boot.
-            if (mod.name == "runtime.dll")
+            // SOGEN_NO_THEIA_HOOKS=1 -- install none of the runtime.dll instrumentation. Every
+            // run in this project has had hooks present, so there is no baseline without them, and
+            // Theia's integrity checker is documented to scan its own code for exactly the 5-byte
+            // patches an int3 execution hook installs. --whp-exec-hook auto cannot serve as the
+            // control: it dies at ~1083 lines rather than ~87900, so it perturbs far more than
+            // whether code is patched. This gate keeps the backend identical and changes only
+            // whether anything is written into Theia's code.
+            if (mod.name == "runtime.dll" && !getenv("SOGEN_NO_THEIA_HOOKS"))
             {
                 struct site
                 {
@@ -1470,9 +1477,18 @@ namespace sogen
                         uint64_t ret = 0;
                         this->memory.try_read_memory(rsp, &ret, sizeof(ret));
 
+                        // The argument list is an assertion macro. 08ED271 shows it plainly:
+                        //   movabs rdx, 0xA011646B214ED628   ; file identifier
+                        //   mov    r8d, 0x21F               ; 543 -- a source line number
+                        //   mov    ecx, 0xE0670101          ; the error code
+                        //   call   09A6DD0
+                        // so each abort site is identified by (code, file, line), not the code
+                        // alone -- which is why 0xE0670102 having 38 call sites was not a dead end.
                         const auto code = this->emu().reg<uint32_t>(x86_register::ecx);
-                        this->log.print(color::red, "[ABORTCODE] reason=%d (0x%X) from +0x%" PRIx64 "\n",
-                                        static_cast<int32_t>(code), code, ret - base);
+                        this->log.print(color::red,
+                                        "[ABORTCODE] code=0x%X file=0x%" PRIx64 " line=%u  from +0x%" PRIx64 "\n", code,
+                                        this->emu().reg<uint64_t>(x86_register::rdx),
+                                        this->emu().reg<uint32_t>(x86_register::r8d), ret - base);
                     });
 
                 // Which abort path reports. 08AB7C0 has eight callers, all shaped
