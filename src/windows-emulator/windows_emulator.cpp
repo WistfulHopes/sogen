@@ -1421,6 +1421,31 @@ namespace sogen
                     }
                 });
 
+                // Theia's tripwire verdict. RUNTIME_FUNCTION[427] at 08DB880 is 35 bytes:
+                //   mov qword [rbp-8], 0 / call 0898380 / mov rax, [rbp-8] / ret
+                // 0898380 is the tripwire (xor eax,eax; mov eax,[rax]; mov eax,0FFFh; syscall),
+                // and the single scope record guards exactly that call with filter 091C8D0 --
+                // the only filter used once in the whole binary. It trampolines to 01442BC8,
+                // which computes EstablisherFrame+0x28, the same slot as [rbp-8]. So the filter
+                // writes what it observed into the value the function returns, and Theia compares
+                // that against what Windows would produce. Reading it at 08DB897 gives the
+                // verdict directly; no constant hunt can, because it is computed from a live
+                // exception and never stored.
+                {
+                    this->emu().hook_memory_execution(mod.image_base + 0x1442BC8, [this](cpu_interface&, const uint64_t) {
+                        this->log.print(color::pink, "[VERDICT] filter entered: pointers=0x%" PRIx64 " frame=0x%" PRIx64 "\n",
+                                        this->emu().reg<uint64_t>(x86_register::rcx), this->emu().reg<uint64_t>(x86_register::rdx));
+                    });
+
+                    this->emu().hook_memory_execution(mod.image_base + 0x8DB897, [this](cpu_interface&, const uint64_t) {
+                        const auto rbp = this->emu().reg<uint64_t>(x86_register::rbp);
+                        uint64_t verdict = 0;
+                        const bool ok = this->memory.try_read_memory(rbp - 8, &verdict, sizeof(verdict));
+                        this->log.print(color::pink, "[VERDICT] tripwire returns 0x%" PRIx64 "%s (rbp=0x%" PRIx64 ")\n", verdict,
+                                        ok ? "" : " <unreadable>", rbp);
+                    });
+                }
+
                 // SOGEN_C0210_BP=1 -- every site in runtime.dll that loads the immediate
                 // 0xC0000210, the "Internal error #4" the dumper dies with. No syscall
                 // returns that status, so it is Theia's own check; several of these are
