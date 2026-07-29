@@ -1421,6 +1421,34 @@ namespace sogen
                     }
                 });
 
+                // Theia's abort helper, and the only datum in the whole crash report that is
+                // not a literal. 09A6DD0 is:
+                //   movsxd rcx, ecx            ; ecx is an integer reason code
+                //   lea    rax, [rip-0x9a6dde] ; == the image base, passed as the "fault address"
+                //   call   08E9FE0 ; int3      ; noreturn
+                // and 08E9FE0 fabricates an EXCEPTION_RECORD whose ExceptionCode (0xC0000005) and
+                // ExceptionInformation[0] (8, execute) are hardcoded, with the address fields set
+                // from that image base. So the reported "execute fault at 0x106190000" is entirely
+                // template: the code, the operation and the address are all constants in Theia's
+                // own source. 08EFF00 then stamps the record with "PACKRDMP" and a timestamp
+                // before reporting, which is what routes it to the crash dumper.
+                //
+                // ecx is therefore the actual reason, and the return address names which of the
+                // ten-plus call sites decided to abort. Nothing else in the report distinguishes
+                // one failure from another, which is why the C0000210 and 0x80070000 constant
+                // hunts both came back empty with hooks proven to fire -- the code is a parameter,
+                // never a stored constant.
+                this->emu().hook_memory_execution(
+                    mod.image_base + 0x9A6DD0, [this, base = mod.image_base](cpu_interface&, const uint64_t) {
+                        const auto rsp = this->emu().reg<uint64_t>(x86_register::rsp);
+                        uint64_t ret = 0;
+                        this->memory.try_read_memory(rsp, &ret, sizeof(ret));
+
+                        const auto code = this->emu().reg<uint32_t>(x86_register::ecx);
+                        this->log.print(color::red, "[ABORTCODE] reason=%d (0x%X) from +0x%" PRIx64 "\n",
+                                        static_cast<int32_t>(code), code, ret - base);
+                    });
+
                 // Which abort path reports. 08AB7C0 has eight callers, all shaped
                 // report(record_ptr, context_ptr, 0, 0) with the two pointers loaded from a
                 // struct rather than built from a live exception -- 08BD5F6 shows the logic
