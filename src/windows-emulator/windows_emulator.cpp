@@ -1374,6 +1374,53 @@ namespace sogen
                     {0x898384, "CONTROL tripwire (known to execute)"},
                 };
 
+                // Theia's fatal-exception reporter. Two of its SEH scope-table filters
+                // (0972060, 0897920) are byte-identical and do only this:
+                //   mov rax,[rcx] / mov rdx,[rcx+8] / mov rcx,rax / xor r8d,r8d / xor r9d,r9d
+                //   call 08AB7C0 / int3
+                // The trailing int3 is unreachable-code padding, so the callee is noreturn: this
+                // address is reached only once Theia has judged an exception fatal, and it is
+                // handed the record describing it. Always armed -- it fires at most once, after
+                // the decision to die, so it cannot alter behaviour, and it replaces inferring a
+                // run's cause of death from whatever happened to be logged last.
+                this->emu().hook_memory_execution(mod.image_base + 0x8AB7C0, [this](cpu_interface&, const uint64_t) {
+                    const auto record = this->emu().reg<uint64_t>(x86_register::rcx);
+                    const auto context = this->emu().reg<uint64_t>(x86_register::rdx);
+
+                    struct
+                    {
+                        uint32_t code;
+                        uint32_t flags;
+                        uint64_t nested;
+                        uint64_t address;
+                        uint32_t parameter_count;
+                    } er{};
+
+                    if (!this->memory.try_read_memory(record, &er, sizeof(er)))
+                    {
+                        this->log.print(color::red, "[FATAL] reporter reached, record 0x%" PRIx64 " unreadable\n", record);
+                        return;
+                    }
+
+                    // CONTEXT.Rip sits at +0xF8 on x64.
+                    uint64_t rip = 0;
+                    this->memory.try_read_memory(context + 0xF8, &rip, sizeof(rip));
+
+                    this->log.print(color::red,
+                                    "[FATAL] Theia reports a fatal exception: code=0x%08X flags=0x%08X"
+                                    " at=0x%" PRIx64 " params=%u context_rip=0x%" PRIx64 "\n",
+                                    er.code, er.flags, er.address, er.parameter_count, rip);
+
+                    for (uint32_t i = 0; i < er.parameter_count && i < 15; ++i)
+                    {
+                        uint64_t p = 0;
+                        if (this->memory.try_read_memory(record + 0x20 + i * 8, &p, sizeof(p)))
+                        {
+                            this->log.print(color::red, "[FATAL]   info[%u] = 0x%" PRIx64 "\n", i, p);
+                        }
+                    }
+                });
+
                 // SOGEN_C0210_BP=1 -- every site in runtime.dll that loads the immediate
                 // 0xC0000210, the "Internal error #4" the dumper dies with. No syscall
                 // returns that status, so it is Theia's own check; several of these are
