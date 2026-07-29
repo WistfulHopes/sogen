@@ -577,6 +577,16 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            static const bool dumper_shim = [] {
+                const auto* enabled = std::getenv("SOGEN_DUMPER_SHIM");
+                return enabled && enabled[0] == '1';
+            }();
+            if (dumper_shim)
+            {
+                process_handle.write(REMOTE_PARENT_PROCESS_HANDLE);
+                return STATUS_SUCCESS;
+            }
+
             // The emulator hosts a single process; any other pid does not exist.
             return STATUS_INVALID_CID;
         }

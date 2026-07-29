@@ -1314,9 +1314,18 @@ namespace sogen
         unalign_stack(emu);
         cpu_context::save(emu, ctx);
 
-        ctx.Rip = context.rtl_user_thread_start;
-        ctx.Rcx = this->start_address;
-        ctx.Rdx = this->argument;
+        if (this->create_flags & THREAD_CREATE_FLAGS_SKIP_LOADER_INIT)
+        {
+            ctx.Rip = this->start_address;
+            ctx.Rcx = this->argument;
+            ctx.Rdx = 0;
+        }
+        else
+        {
+            ctx.Rip = context.rtl_user_thread_start;
+            ctx.Rcx = this->start_address;
+            ctx.Rdx = this->argument;
+        }
 
         const auto ctx_obj = allocate_object_on_stack<CONTEXT64>(emu);
         ctx_obj.write(ctx);

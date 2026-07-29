@@ -429,6 +429,8 @@ namespace sogen
         uint64_t dbwin_buffer{0};
         uint64_t dbwin_buffer_size{0};
 
+        uint64_t packer_shared_section_backing{0};
+
         std::optional<NTSTATUS> exit_status{};
 
         emulator_allocator base_allocator;
@@ -514,6 +516,7 @@ namespace sogen
         handle default_desktop_window_handle{};
         handle_store<handle_types::event, event> events{};
         handle_store<handle_types::event, keyed_event> keyed_events{};
+
         handle_store<handle_types::process, process_object, 1> processes{};
 
         handle_store<handle_types::file, file> files{};

@@ -113,6 +113,17 @@ namespace sogen
 
             entry->second.handler(c);
 
+            static const bool trace_not_supported = [] {
+                const auto* enabled = std::getenv("SOGEN_TRACE_NOT_SUPPORTED");
+                return enabled && enabled[0] == '1';
+            }();
+
+            if (trace_not_supported &&
+                (emu.reg<uint64_t>(x86_register::rax) & 0xFFFFFFFF) == static_cast<uint32_t>(STATUS_NOT_SUPPORTED))
+            {
+                win_emu.log.error("Syscall %s returned STATUS_NOT_SUPPORTED (0x%" PRIx64 ")\n", entry->second.name.c_str(), address);
+            }
+
             dispatch_callback(win_emu, entry->second.name);
         }
         catch (std::exception& e)

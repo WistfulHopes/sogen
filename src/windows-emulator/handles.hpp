@@ -600,6 +600,9 @@ namespace sogen
     constexpr auto SHARED_SECTION = make_pseudo_handle(0x1, handle_types::section);
     constexpr auto DBWIN_BUFFER = make_pseudo_handle(0x2, handle_types::section);
 
+    constexpr auto PACKER_SHARED_SECTION_HANDLE = make_pseudo_handle(0x3, handle_types::section);
+    constexpr uint64_t PACKER_SHARED_SECTION_SIZE = 0x200000;
+
     constexpr auto WER_PORT_READY = make_pseudo_handle(0x1, handle_types::event);
     constexpr auto DBWIN_DATA_READY = make_pseudo_handle(0x2, handle_types::event);
     constexpr auto DBWIN_BUFFER_READY = make_pseudo_handle(0x3, handle_types::event);
@@ -621,6 +624,8 @@ namespace sogen
     // pid value seeded into that registry key.
     constexpr uint32_t STEAM_FAKE_PROCESS_ID = 0x8B0;
     constexpr auto STEAM_PROCESS_HANDLE = make_pseudo_handle(0x1, handle_types::process);
+
+    constexpr auto REMOTE_PARENT_PROCESS_HANDLE = make_handle(0x3, handle_types::process, false);
 
     constexpr auto CURRENT_PROCESS = make_handle(~0ULL);
     constexpr auto CURRENT_THREAD = make_handle(~1ULL);

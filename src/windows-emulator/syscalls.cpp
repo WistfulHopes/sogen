@@ -1036,9 +1036,146 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtCreateUserProcess()
+        NTSTATUS handle_NtCreateUserProcess(
+            const syscall_context& c, const emulator_object<handle> process_handle,
+            const emulator_object<handle> thread_handle, const ACCESS_MASK /*process_desired_access*/,
+            const ACCESS_MASK /*thread_desired_access*/,
+            const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*process_object_attributes*/,
+            const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*thread_object_attributes*/,
+            const ULONG /*process_flags*/, const ULONG /*thread_flags*/,
+            const emulator_object<RTL_USER_PROCESS_PARAMETERS64> process_parameters,
+            const emulator_object<PS_CREATE_INFO<EmulatorTraits<Emu64>>> create_info,
+            const emulator_object<PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>> attribute_list)
         {
-            return STATUS_NOT_SUPPORTED;
+            constexpr uint32_t PS_ATTRIBUTE_IMAGE_NAME = 0x00020005;
+
+            if (!process_handle || !thread_handle || !create_info)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto info = create_info.read();
+            if (info.Size != sizeof(PS_CREATE_INFO<EmulatorTraits<Emu64>>))
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            if (info.State != PsCreateInitialState)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            std::u16string image_path{};
+            std::u16string command_line{};
+
+            if (process_parameters)
+            {
+                const auto params = process_parameters.read();
+                image_path = read_unicode_string(c.emu, params.ImagePathName);
+                command_line = read_unicode_string(c.emu, params.CommandLine);
+            }
+
+            if (attribute_list)
+            {
+                constexpr auto header_size = offsetof(PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>, Attributes);
+                constexpr auto entry_size = sizeof(PS_ATTRIBUTE<EmulatorTraits<Emu64>>);
+
+                const auto total_length = static_cast<uint64_t>(attribute_list.read().TotalLength);
+                if (total_length < header_size || (total_length - header_size) % entry_size != 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto count = (total_length - header_size) / entry_size;
+                for (uint64_t i = 0; i < count; ++i)
+                {
+                    const emulator_object<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> entry_obj{
+                        c.emu, attribute_list.value() + header_size + i * entry_size};
+                    const auto entry = entry_obj.read();
+
+                    if (static_cast<uint32_t>(entry.Attribute) != PS_ATTRIBUTE_IMAGE_NAME || entry.Size == 0)
+                    {
+                        continue;
+                    }
+
+                    std::u16string name{};
+                    name.resize(static_cast<size_t>(entry.Size) / sizeof(char16_t));
+                    c.emu.read_memory(entry.Value, name.data(), static_cast<size_t>(entry.Size));
+                    image_path = std::move(name);
+                }
+            }
+
+            if (image_path.empty())
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            c.win_emu.callbacks.on_generic_access("Creating process", image_path);
+
+            process_object proc{};
+            proc.image_path = image_path;
+            proc.command_line = command_line;
+
+            const auto [new_handle, object] = c.proc.processes.store_and_get(std::move(proc));
+
+            // Plausible identifiers: Windows process and thread ids are multiples of four.
+            object->process_id = 0x1000 + (static_cast<uint32_t>(new_handle.value.id) * 4);
+            object->thread_id = object->process_id + 4;
+
+            process_handle.write(new_handle);
+
+            static const bool run_child = [] {
+                const auto* enabled = std::getenv("SOGEN_RUN_CHILD_PROCESS");
+                return enabled && enabled[0] == '1';
+            }();
+
+            bool child_started = false;
+            if (run_child)
+            {
+                auto* child_image =
+                    c.win_emu.mod_manager.map_module(windows_path{image_path}, c.win_emu.log, false, true);
+
+                if (child_image)
+                {
+                    const auto child_thread = c.proc.create_thread(c.win_emu.memory, child_image->entry_point, 0, 0,
+                                                                   THREAD_CREATE_FLAGS_SKIP_LOADER_INIT, false);
+                    thread_handle.write(child_thread);
+                    child_started = true;
+
+                    if (auto* thr = c.proc.threads.get(child_thread))
+                    {
+                        object->thread_id = thr->id;
+                    }
+
+                    c.win_emu.log.error("Child process image mapped at 0x%" PRIx64 ", entry 0x%" PRIx64 ", thread id %u\n",
+                                        child_image->image_base, child_image->entry_point, object->thread_id);
+                }
+                else
+                {
+                    c.win_emu.log.error("Failed to map child process image\n");
+                }
+            }
+
+            if (!child_started)
+            {
+                thread_handle.write(make_handle(0x7F0000 + static_cast<uint32_t>(new_handle.value.id),
+                                                handle_types::thread, false));
+            }
+
+            info.State = PsCreateSuccess;
+            info.SuccessState.OutputFlags = 0;
+            info.SuccessState.FileHandle = 0;
+            info.SuccessState.SectionHandle = 0;
+            info.SuccessState.UserProcessParametersNative = process_parameters.value();
+            info.SuccessState.UserProcessParametersWow64 = 0;
+            info.SuccessState.CurrentParameterFlags = 0;
+            info.SuccessState.PebAddressNative = 0;
+            info.SuccessState.PebAddressWow64 = 0;
+            info.SuccessState.ManifestAddress = 0;
+            info.SuccessState.ManifestSize = 0;
+            create_info.write(info);
+
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtCreateDebugObject()

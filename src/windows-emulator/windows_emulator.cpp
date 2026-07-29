@@ -934,12 +934,7 @@ namespace sogen
     {
         auto& thread = vcpu.thread();
 
-        if (thread.pending_trap_flag_restore)
-        {
-            thread.pending_trap_flag_restore = false;
-            const auto flags = vcpu.cpu.reg<uint64_t>(x86_register::rflags);
-            vcpu.cpu.reg(x86_register::rflags, flags | trap_flag);
-        }
+        thread.pending_skip_single_step = false;
 
         if (!thread.callback_stack.empty() && address == this->process.zw_callback_return)
         {
@@ -1107,8 +1102,7 @@ namespace sogen
                 const auto flags = acting.reg<uint64_t>(x86_register::rflags);
                 if (flags & trap_flag)
                 {
-                    acting.reg(x86_register::rflags, flags & ~trap_flag);
-                    vcpu.thread().pending_trap_flag_restore = true;
+                    vcpu.thread().pending_skip_single_step = true;
                 }
             }
 
@@ -1169,6 +1163,12 @@ namespace sogen
                 dispatch_integer_division_by_zero(*this, vcpu);
                 return;
             case 1:
+                if (vcpu.thread().pending_skip_single_step)
+                {
+                    vcpu.thread().pending_skip_single_step = false;
+                    return;
+                }
+
                 if ((eflags & 0x100) != 0)
                 {
                     acting.reg(x86_register::eflags, eflags & ~0x100);

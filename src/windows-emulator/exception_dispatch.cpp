@@ -94,8 +94,10 @@ namespace sogen
             uint64_t ss;
         };
 
+
         void dispatch_exception_pointers(x86_64_cpu& emu, const uint64_t dispatcher,
-                                         const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
+                                         const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers,
+                                         const uint64_t instrumentation_callback)
         {
             constexpr auto mach_frame_size = 0x40;
             constexpr auto context_record_size = 0x4F0;
@@ -146,7 +148,15 @@ namespace sogen
             if (!bitness || *bitness != segment_utils::segment_bitness::bit32)
             {
                 emu.reg(x86_register::rsp, new_sp);
-                emu.reg(x86_register::rip, dispatcher);
+                if (instrumentation_callback != 0)
+                {
+                    emu.reg(x86_register::rip, instrumentation_callback);
+                    emu.reg(x86_register::r10, dispatcher + kiuser_instrumentation_continuation_offset);
+                }
+                else
+                {
+                    emu.reg(x86_register::rip, dispatcher);
+                }
                 return;
             }
 
@@ -260,9 +270,9 @@ namespace sogen
         CONTEXT64 ctx{};
         ctx.ContextFlags = CONTEXT64_ALL;
         cpu_context::save(vcpu.cpu, ctx);
-        ctx.Rip = win_emu.uses_instruction_precision() //
+        /* ctx.Rip = win_emu.uses_instruction_precision() //
                       ? thread.current_ip
-                      : vcpu.cpu.read_instruction_pointer();
+                      : vcpu.cpu.read_instruction_pointer(); */
 
         exception_record record{};
         memset(&record, 0, sizeof(record));
@@ -299,7 +309,8 @@ namespace sogen
         EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers{};
         pointers.ContextRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&ctx);
         pointers.ExceptionRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&record);
-        dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher, pointers);
+        dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher, pointers,
+                                    win_emu.process.instrumentation_callback);
     }
 
     void dispatch_access_violation(windows_emulator& win_emu, vcpu_context& vcpu, const uint64_t address, const memory_operation operation)
