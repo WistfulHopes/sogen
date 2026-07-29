@@ -1280,58 +1280,26 @@ namespace sogen
     void windows_emulator::setup_hooks()
     {
         this->callbacks.on_module_load.add([this](mapped_module& mod) {
-            for (size_t i = 0; i < mod.sections.size(); ++i)
+            if (getenv("SOGEN_MODLOAD"))
             {
-                this->install_section_first_execution_hook(mod, i);
+                this->log.print(color::pink, "[MODLOAD] '%s'\n", mod.name.c_str());
             }
-
-            // ---- Theia container/page key capture ------------------------------------
-            // The page cipher is fully solved offline (tools/dumper/theia_blake3.h): it is
-            // BLAKE3 compress, 7 rounds, zero message block, keyed by a 33-byte struct
-            // (32-byte cv + block_len at +32, flags = that byte ^ 0x1B). What is NOT known
-            // is how that cv is derived -- it changes per 4 KB page, and ~1.3G candidates
-            // at align 1 proved it is stored in no shipped file and no memory snapshot.
-            //
-            // Scanning for it is therefore hopeless, but reading it is trivial: exactly TWO
-            // instructions in the whole 61 MB of runtime.dll call the cipher, and rcx holds
-            // the key struct at both. Hooking them here is undetectable in a way no native
-            // technique is -- Theia's dispatched block opens with `pushfq` so a trap flag is
-            // visible to it, and int3 patches its own code. An emulator execution hook
-            // exists entirely outside the guest.
-            //
-            // Init decrypts pages just to run (the game exe's .text ships as ciphertext), so
-            // this fires long before any pak is opened -- it does not need the game to boot.
-            if (mod.name == "runtime.dll")
-            {
-                struct site
-                {
-                    uint64_t rva;
-                    const char* what;
-                };
-                static constexpr site sites[] = {
-                    {0x1559246, "container (sub_201559147)"},
-                    {0x159585D, "page fault (sub_20159552B)"},
-                    // Control: the tripwire, which the #DB trace proves executes in both
-                    // processes. If this fires and the two cipher sites do not, they are
-                    // genuinely unreached rather than unhooked.
-                    {0x898384, "CONTROL tripwire (known to execute)"},
-                };
 
             // SOGEN_LDRNAME=1 -- Theia's dumper calls GetModuleHandleW/LdrGetDllHandle and then
             // goes straight to formatting its failure message, so whatever module it fails to
             // find is what the dump needs. LdrGetDllHandle's third argument (r8) is the
             // PUNICODE_STRING name; log it rather than guessing at dbghelp/dbgcore.
-            // Arm at the first module load where ntdll is available, rather than keying on a
-            // specific module. In the parent, runtime.dll loads long after ntdll; in the child
-            // runtime.dll IS the executable and map_main_modules maps it BEFORE ntdll, so a
-            // runtime.dll-keyed branch left the child unhooked -- and the dumper runs there.
-            // Per-emulator, not per-process: a plain `static` here is shared by the parent and
-            // child instances, so only whichever loaded first would ever arm.
-            static std::set<const windows_emulator*> ldr_armed;
-            if (this->mod_manager.ntdll && getenv("SOGEN_LDRNAME") && ldr_armed.emplace(this).second)
+            // Key on the module being loaded, not mod_manager.ntdll: that pointer is assigned
+            // AFTER map_module_or_throw returns, so it is still null while ntdll's own
+            // on_module_load runs. Using `mod` directly works in both emulators regardless of
+            // the order map_main_modules happens to use.
+            if (mod.name == "ntdll.dll" && getenv("SOGEN_LDRNAME"))
             {
-                const auto* ntdll_mod = this->mod_manager.ntdll;
-                if (const auto addr = ntdll_mod ? ntdll_mod->find_export("LdrGetDllHandle") : 0)
+                // find_export() returns 0 here: exports are not parsed yet when on_module_load
+                // fires for a module. The RVA is stable and the trace already names the
+                // address, so derive it from the image base instead.
+                constexpr uint64_t ldr_get_dll_handle_rva = 0x15520;
+                if (const auto addr = mod.image_base + ldr_get_dll_handle_rva)
                 {
                     this->emu().hook_memory_execution(addr, [this](cpu_interface&, const uint64_t) {
                         const auto us = this->emu().reg<uint64_t>(x86_register::r8);
@@ -1368,6 +1336,43 @@ namespace sogen
                     this->log.info("[HOOKTEST] armed at 0x%" PRIx64 "\n", probe);
                 }
             }
+
+            for (size_t i = 0; i < mod.sections.size(); ++i)
+            {
+                this->install_section_first_execution_hook(mod, i);
+            }
+
+            // ---- Theia container/page key capture ------------------------------------
+            // The page cipher is fully solved offline (tools/dumper/theia_blake3.h): it is
+            // BLAKE3 compress, 7 rounds, zero message block, keyed by a 33-byte struct
+            // (32-byte cv + block_len at +32, flags = that byte ^ 0x1B). What is NOT known
+            // is how that cv is derived -- it changes per 4 KB page, and ~1.3G candidates
+            // at align 1 proved it is stored in no shipped file and no memory snapshot.
+            //
+            // Scanning for it is therefore hopeless, but reading it is trivial: exactly TWO
+            // instructions in the whole 61 MB of runtime.dll call the cipher, and rcx holds
+            // the key struct at both. Hooking them here is undetectable in a way no native
+            // technique is -- Theia's dispatched block opens with `pushfq` so a trap flag is
+            // visible to it, and int3 patches its own code. An emulator execution hook
+            // exists entirely outside the guest.
+            //
+            // Init decrypts pages just to run (the game exe's .text ships as ciphertext), so
+            // this fires long before any pak is opened -- it does not need the game to boot.
+            if (mod.name == "runtime.dll")
+            {
+                struct site
+                {
+                    uint64_t rva;
+                    const char* what;
+                };
+                static constexpr site sites[] = {
+                    {0x1559246, "container (sub_201559147)"},
+                    {0x159585D, "page fault (sub_20159552B)"},
+                    // Control: the tripwire, which the #DB trace proves executes in both
+                    // processes. If this fires and the two cipher sites do not, they are
+                    // genuinely unreached rather than unhooked.
+                    {0x898384, "CONTROL tripwire (known to execute)"},
+                };
 
                 // SOGEN_C0210_BP=1 -- every site in runtime.dll that loads the immediate
                 // 0xC0000210, the "Internal error #4" the dumper dies with. No syscall
