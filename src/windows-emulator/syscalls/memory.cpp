@@ -154,6 +154,18 @@ namespace sogen
                                              const uint32_t info_class, const uint64_t memory_information,
                                              const uint64_t memory_information_length, const emulator_object<uint64_t> return_length)
         {
+            // SOGEN_QVM_DEBUG=1 -- Theia's init can sink into an unbounded
+            // NtQueryVirtualMemory loop that returns mostly 0xC000000D, and a status code
+            // alone does not say which info class it wanted. Inferring from statuses has
+            // already cost several rounds on this project; logging the actual arguments has
+            // resolved every one of them immediately.
+            static const bool qvm_debug = getenv("SOGEN_QVM_DEBUG") != nullptr;
+            if (qvm_debug)
+            {
+                c.win_emu.log.print(color::cyan, "[QVM] class=%u addr=0x%" PRIx64 " len=0x%" PRIx64 "\n",
+                                    static_cast<unsigned>(info_class), base_address, memory_information_length);
+            }
+
             // A dumper walks its target's address space with MemoryBasicInformation before
             // reading it, so the parent handle has to answer region queries from the parent's
             // memory manager too.
