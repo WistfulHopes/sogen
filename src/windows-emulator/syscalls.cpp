@@ -1036,226 +1036,220 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtCreateUserProcess(const syscall_context& c)
+        NTSTATUS handle_NtCreateUserProcess(
+            const syscall_context& c, const emulator_object<handle> process_handle,
+            const emulator_object<handle> thread_handle, const ACCESS_MASK /*process_desired_access*/,
+            const ACCESS_MASK /*thread_desired_access*/,
+            const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*process_object_attributes*/,
+            const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*thread_object_attributes*/,
+            const ULONG /*process_flags*/, const ULONG /*thread_flags*/,
+            const emulator_object<RTL_USER_PROCESS_PARAMETERS64> process_parameters,
+            const emulator_object<PS_CREATE_INFO<EmulatorTraits<Emu64>>> create_info,
+            const emulator_object<PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>> attribute_list)
         {
-            // Theia spawns runtime.dll as a child process during init, then talks to it
-            // through a shared section. The parent builds the child's
-            // RTL_USER_PROCESS_PARAMETERS in its own address space, so everything needed to
-            // boot the child is readable from right here (arg 9 / index 8):
-            //   +0x60 ImagePathName (UNICODE_STRING)  +0x70 CommandLine  +0x80 Environment
-            //
-            // The environment block is the actual parent->child interface -- the
-            // PS_ATTRIBUTE_LIST carries only the image name, no handle list, no client id,
-            // no token. Theia injects PACKER_SECTION (a section handle) and
-            // PACKER_FUNCTIONALITY there, so those values must reach the child verbatim.
+            constexpr uint32_t PS_ATTRIBUTE_IMAGE_NAME = 0x00020005;
+
+            if (!process_handle || !thread_handle || !create_info)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto info = create_info.read();
+            if (info.Size != sizeof(PS_CREATE_INFO<EmulatorTraits<Emu64>>))
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            if (info.State != PsCreateInitialState)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
             std::u16string image_path{};
-            utils::unordered_insensitive_u16string_map<std::u16string> child_env{};
+            std::u16string command_line{};
 
-            try
+            if (process_parameters)
             {
-                const auto params = get_syscall_argument(c.emu, 8);
-                if (params)
-                {
-                    const auto read_ustr = [&](const uint64_t addr) -> std::u16string {
-                        const auto length = c.emu.read_memory<uint16_t>(addr);
-                        const auto buffer = c.emu.read_memory<uint64_t>(addr + 8);
-                        if (!length || !buffer || length > 0x1000)
-                        {
-                            return {};
-                        }
-                        std::u16string str(length / sizeof(char16_t), u'\0');
-                        c.emu.read_memory(buffer, str.data(), length);
-                        return str;
-                    };
-
-                    image_path = read_ustr(params + 0x60);
-                    c.win_emu.log.print(color::red, "[CHILDPROC] image='%s' cmdline='%s'\n", u16_to_u8(image_path).c_str(),
-                                        u16_to_u8(read_ustr(params + 0x70)).c_str());
-
-                    // The block is double-NUL-terminated UTF-16 "NAME=VALUE" entries.
-                    const auto env = c.emu.read_memory<uint64_t>(params + 0x80);
-                    if (env)
-                    {
-                        std::u16string entry;
-                        for (uint64_t off = 0; off < 0x8000; off += 2)
-                        {
-                            const auto ch = c.emu.read_memory<char16_t>(env + off);
-                            if (ch)
-                            {
-                                entry.push_back(ch);
-                                continue;
-                            }
-                            if (entry.empty())
-                            {
-                                break; // double NUL -- end of block
-                            }
-                            c.win_emu.log.print(color::red, "[CHILDENV] %s\n", u16_to_u8(entry).c_str());
-
-                            // Split on the FIRST '=' only. Theia's values are raw
-                            // little-endian bytes biased by +0x100 so the block holds no
-                            // NULs, so a value can contain anything at all, '=' included.
-                            if (const auto eq = entry.find(u'='); eq != std::u16string::npos && eq > 0)
-                            {
-                                child_env.insert_or_assign(entry.substr(0, eq), entry.substr(eq + 1));
-                            }
-                            entry.clear();
-                        }
-                    }
-                }
-            }
-            catch (...)
-            {
-                c.win_emu.log.print(color::red, "[CHILDPROC] <could not read process parameters>\n");
+                const auto params = process_parameters.read();
+                image_path = read_unicode_string(c.emu, params.ImagePathName);
+                command_line = read_unicode_string(c.emu, params.CommandLine);
             }
 
-            // Report success with an inert child. PS_CREATE_INFO (x64):
-            //   +0x00 SIZE_T Size
-            //   +0x08 PS_CREATE_STATE State   (PsCreateSuccess == 6)
-            // The caller checks State before reading the SuccessState union, so setting
-            // Size/State and handing back handles is the minimum that looks like a success.
-            try
+            if (attribute_list)
             {
-                const emulator_object<handle> process_handle{c.emu, get_syscall_argument(c.emu, 0)};
-                const emulator_object<handle> thread_handle{c.emu, get_syscall_argument(c.emu, 1)};
-                if (process_handle.value())
+                constexpr auto header_size = offsetof(PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>, Attributes);
+                constexpr auto entry_size = sizeof(PS_ATTRIBUTE<EmulatorTraits<Emu64>>);
+
+                const auto total_length = static_cast<uint64_t>(attribute_list.read().TotalLength);
+                if (total_length < header_size || (total_length - header_size) % entry_size != 0)
                 {
-                    process_handle.write(PACKER_CHILD_PROCESS_HANDLE);
-                }
-                if (thread_handle.value())
-                {
-                    thread_handle.write(PACKER_CHILD_THREAD_HANDLE);
+                    return STATUS_INVALID_PARAMETER;
                 }
 
-                const auto create_info = get_syscall_argument(c.emu, 9);
-                if (create_info)
+                const auto count = (total_length - header_size) / entry_size;
+                for (uint64_t i = 0; i < count; ++i)
                 {
-                    constexpr uint32_t ps_create_success = 6;
-                    c.emu.write_memory<uint32_t>(create_info + 0x08, ps_create_success);
-                }
+                    const emulator_object<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> entry_obj{
+                        c.emu, attribute_list.value() + header_size + i * entry_size};
+                    const auto entry = entry_obj.read();
 
-                // Dump the PS_ATTRIBUTE_LIST (arg 11 / index 10). This is the actual
-                // parent->child interface, so we need it before real child support can be
-                // written: it carries the image name, client id, and any INHERITED HANDLE
-                // LIST the child uses to find its parent's objects.
-                //   PS_ATTRIBUTE_LIST { SIZE_T TotalLength; PS_ATTRIBUTE Attributes[]; }
-                //   PS_ATTRIBUTE      { ULONG_PTR Attribute; SIZE_T Size; ULONG_PTR Value;
-                //                       PSIZE_T ReturnLength; }   // 0x20 bytes each
-                const auto attr_list = get_syscall_argument(c.emu, 10);
-                if (attr_list)
-                {
-                    const auto total = c.emu.read_memory<uint64_t>(attr_list);
-                    const auto count = (total > 8 && total < 0x1000) ? (total - 8) / 0x20 : 0;
-                    c.win_emu.log.print(color::green, "[CHILDATTR] list @0x%" PRIx64 " total=%" PRIu64 " -> %" PRIu64 " attribute(s)\n",
-                                        attr_list, total, count);
-                    for (uint64_t i = 0; i < count; ++i)
+                    if (static_cast<uint32_t>(entry.Attribute) != PS_ATTRIBUTE_IMAGE_NAME || entry.Size == 0)
                     {
-                        const auto base = attr_list + 8 + i * 0x20;
-                        const auto attribute = c.emu.read_memory<uint64_t>(base);
-                        const auto size = c.emu.read_memory<uint64_t>(base + 8);
-                        const auto value = c.emu.read_memory<uint64_t>(base + 16);
-                        c.win_emu.log.print(color::green, "[CHILDATTR]   num=0x%02" PRIx64 " flags=0x%" PRIx64 " size=%" PRIu64 " value=0x%" PRIx64 "\n",
-                                            attribute & 0xFFFF, attribute >> 16, size, value);
-                        // A HANDLE_LIST attribute points at an array of handles being
-                        // inherited; those are how the child reaches the parent's objects.
-                        if ((attribute & 0xFFFF) == 0x0B && value && size <= 0x200)
+                        continue;
+                    }
+
+                    std::u16string name{};
+                    name.resize(static_cast<size_t>(entry.Size) / sizeof(char16_t));
+                    c.emu.read_memory(entry.Value, name.data(), static_cast<size_t>(entry.Size));
+                    image_path = std::move(name);
+                }
+            }
+
+            if (image_path.empty())
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            c.win_emu.callbacks.on_generic_access("Creating process", image_path);
+
+            process_object proc{};
+            proc.image_path = image_path;
+            proc.command_line = command_line;
+
+            const auto [new_handle, object] = c.proc.processes.store_and_get(std::move(proc));
+
+            // Plausible identifiers: Windows process and thread ids are multiples of four.
+            object->process_id = 0x1000 + (static_cast<uint32_t>(new_handle.value.id) * 4);
+            object->thread_id = object->process_id + 4;
+
+            process_handle.write(new_handle);
+
+            // Two mutually exclusive child strategies, both opt-in.
+            //
+            // SOGEN_CHILD_EMULATOR runs the child as a SEPARATE windows_emulator: its own
+            // address space, PEB and handle table, with the section it inherits backed by one
+            // host buffer aliased into both guests. Mapping a second copy of runtime.dll into
+            // the parent's address space instead (the SOGEN_RUN_CHILD_PROCESS path below)
+            // makes Theia's two instances share globals, and the parent dies within a few
+            // instructions of the child's first null-read tripwire.
+            static const bool child_emulator = [] {
+                const auto* enabled = std::getenv("SOGEN_CHILD_EMULATOR");
+                return enabled && enabled[0] == '1';
+            }();
+
+            if (child_emulator && process_parameters)
+            {
+                auto child_path = image_path;
+                if (child_path.starts_with(u"\\??\\"))
+                {
+                    child_path.erase(0, 4);
+                }
+
+                utils::unordered_insensitive_u16string_map<std::u16string> child_env{};
+                const auto env_block = process_parameters.read().Environment;
+                if (env_block)
+                {
+                    std::u16string entry{};
+                    for (uint64_t off = 0; off < 0x8000; off += 2)
+                    {
+                        const auto ch = c.emu.read_memory<char16_t>(env_block + off);
+                        if (ch)
                         {
-                            for (uint64_t k = 0; k * 8 < size; ++k)
-                            {
-                                const auto h = c.emu.read_memory<uint64_t>(value + k * 8);
-                                c.win_emu.log.print(color::green, "[CHILDATTR]     inherited handle[%" PRIu64 "] = 0x%" PRIx64 "\n", k, h);
-                            }
+                            entry.push_back(ch);
+                            continue;
                         }
+                        if (entry.empty())
+                        {
+                            break;
+                        }
+                        // First '=' only: Theia's values are raw bytes biased by +0x100 so the
+                        // block holds no NULs, and may contain anything.
+                        if (const auto eq = entry.find(u'='); eq != std::u16string::npos && eq > 0)
+                        {
+                            child_env.insert_or_assign(entry.substr(0, eq), entry.substr(eq + 1));
+                        }
+                        entry.clear();
                     }
                 }
 
-                // Dump every live section's backing memory at spawn time. The child maps the
-                // PACKER_SECTION handle and then waits on its contents, so these bytes ARE
-                // the parent->child handshake payload. Capturing them here lets the child be
-                // run standalone with a pre-filled section, instead of emulating both.
+                auto* child = c.win_emu.create_child_process(application_settings{
+                    .application = child_path,
+                    .environment = std::move(child_env),
+                });
+
+                if (child)
                 {
-                    int idx = 0;
-                    for (auto& [sec_handle, sec] : c.proc.sections)
+                    for (const auto& index : c.proc.sections | std::views::keys)
                     {
-                        if (!sec.backing_address)
-                        {
-                            continue;
-                        }
-                        const auto size = static_cast<size_t>(std::min<uint64_t>(sec.maximum_size, 0x100000));
-                        std::vector<uint8_t> buf(size);
-                        try
-                        {
-                            c.emu.read_memory(sec.backing_address, buf.data(), size);
-                        }
-                        catch (...)
-                        {
-                            continue;
-                        }
-                        size_t nonzero = 0;
-                        for (const auto b : buf)
-                        {
-                            nonzero += (b != 0);
-                        }
-                        char path[256];
-                        sprintf(path, "C:\\dev\\tokon\\dumps\\packer_section_%d.bin", idx++);
-                        if (FILE* f = fopen(path, "wb"))
-                        {
-                            fwrite(buf.data(), 1, size, f);
-                            fclose(f);
-                        }
-                        c.win_emu.log.print(color::green,
-                                            "[SECDUMP] handle=0x%" PRIx64 " backing=0x%" PRIx64 " size=%zu nonzero=%zu -> %s\n",
-                                            static_cast<uint64_t>(sec_handle), sec.backing_address, size, nonzero, path);
+                        c.win_emu.share_section_with_child(index, *child);
                     }
-                }
 
-                if (image_path.starts_with(u"\\??\\"))
-                {
-                    image_path.erase(0, 4);
-                }
+                    c.win_emu.log.print(color::green, "[CHILDPROC] ---- child emulator starting ----\n");
+                    c.win_emu.run_children_slice(CHILD_BOOT_INSTRUCTIONS);
 
-                windows_emulator* child = nullptr;
-                if (!image_path.empty())
-                {
-                    child = c.win_emu.create_child_process(application_settings{
-                        .application = image_path,
-                        .environment = std::move(child_env),
-                    });
-                }
-
-                if (!child)
-                {
-                    c.win_emu.log.print(color::red, "[CHILDPROC] child not created -- inert handles only\n");
+                    info.State = PsCreateSuccess;
+                    info.SuccessState.UserProcessParametersNative = process_parameters.value();
+                    create_info.write(info);
+                    thread_handle.write(make_handle(0x7F0000 + static_cast<uint32_t>(new_handle.value.id),
+                                                    handle_types::thread, false));
                     return STATUS_SUCCESS;
                 }
 
-                // Theia names the section it wants via PACKER_SECTION in the environment, so the
-                // handle value must match exactly. Sharing every pagefile-backed section avoids
-                // having to decode that variable here.
-                for (const auto& index : c.proc.sections | std::views::keys)
+                c.win_emu.log.print(color::red, "[CHILDPROC] child emulator not created\n");
+            }
+
+            static const bool run_child = [] {
+                const auto* enabled = std::getenv("SOGEN_RUN_CHILD_PROCESS");
+                return enabled && enabled[0] == '1';
+            }();
+
+            bool child_started = false;
+            if (run_child)
+            {
+                auto* child_image =
+                    c.win_emu.mod_manager.map_module(windows_path{image_path}, c.win_emu.log, false, true);
+
+                if (child_image)
                 {
-                    c.win_emu.share_section_with_child(index, *child);
+                    const auto child_thread = c.proc.create_thread(c.win_emu.memory, child_image->entry_point, 0, 0,
+                                                                   THREAD_CREATE_FLAGS_SKIP_LOADER_INIT, false);
+                    thread_handle.write(child_thread);
+                    child_started = true;
+
+                    if (auto* thr = c.proc.threads.get(child_thread))
+                    {
+                        object->thread_id = thr->id;
+                    }
+
+                    c.win_emu.log.error("Child process image mapped at 0x%" PRIx64 ", entry 0x%" PRIx64 ", thread id %u\n",
+                                        child_image->image_base, child_image->entry_point, object->thread_id);
                 }
+                else
+                {
+                    c.win_emu.log.error("Failed to map child process image\n");
+                }
+            }
 
-                // Not child->start(): running the child to completion would freeze the parent
-                // inside this handler, and the two share memory -- the child writes its mailbox
-                // and polls for a reply the stopped parent could never write. The child is
-                // instead scheduled in slices from handle_NtYieldExecution; this first slice
-                // just gets it far enough to map the section.
-                c.win_emu.log.print(color::green, "[CHILDPROC] ---- child emulator starting ----\n");
-                c.win_emu.run_children_slice(CHILD_BOOT_INSTRUCTIONS);
+            if (!child_started)
+            {
+                thread_handle.write(make_handle(0x7F0000 + static_cast<uint32_t>(new_handle.value.id),
+                                                handle_types::thread, false));
+            }
 
-                return STATUS_SUCCESS;
-            }
-            catch (const std::exception& e)
-            {
-                c.win_emu.log.print(color::red, "[CHILDPROC] failed -- falling back: %s\n", e.what());
-                return STATUS_NOT_SUPPORTED;
-            }
-            catch (...)
-            {
-                c.win_emu.log.print(color::red, "[CHILDPROC] failed -- falling back (non-standard exception)\n");
-                return STATUS_NOT_SUPPORTED;
-            }
+            info.State = PsCreateSuccess;
+            info.SuccessState.OutputFlags = 0;
+            info.SuccessState.FileHandle = 0;
+            info.SuccessState.SectionHandle = 0;
+            info.SuccessState.UserProcessParametersNative = process_parameters.value();
+            info.SuccessState.UserProcessParametersWow64 = 0;
+            info.SuccessState.CurrentParameterFlags = 0;
+            info.SuccessState.PebAddressNative = 0;
+            info.SuccessState.PebAddressWow64 = 0;
+            info.SuccessState.ManifestAddress = 0;
+            info.SuccessState.ManifestSize = 0;
+            create_info.write(info);
+
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtCreateDebugObject()

@@ -627,6 +627,9 @@ namespace sogen
     constexpr auto SHARED_SECTION = make_pseudo_handle(0x1, handle_types::section);
     constexpr auto DBWIN_BUFFER = make_pseudo_handle(0x2, handle_types::section);
 
+    constexpr auto PACKER_SHARED_SECTION_HANDLE = make_pseudo_handle(0x3, handle_types::section);
+    constexpr uint64_t PACKER_SHARED_SECTION_SIZE = 0x200000;
+
     constexpr auto WER_PORT_READY = make_pseudo_handle(0x1, handle_types::event);
     constexpr auto DBWIN_DATA_READY = make_pseudo_handle(0x2, handle_types::event);
     constexpr auto DBWIN_BUFFER_READY = make_pseudo_handle(0x3, handle_types::event);
@@ -660,6 +663,7 @@ namespace sogen
     // Theia actually expects the child to do.
     constexpr auto PACKER_CHILD_PROCESS_HANDLE = make_pseudo_handle(0x2, handle_types::process);
     constexpr auto PACKER_CHILD_THREAD_HANDLE = make_pseudo_handle(0x2, handle_types::thread);
+    constexpr auto REMOTE_PARENT_PROCESS_HANDLE = make_handle(0x3, handle_types::process, false);
 
     constexpr auto CURRENT_PROCESS = make_handle(~0ULL);
     constexpr auto CURRENT_THREAD = make_handle(~1ULL);

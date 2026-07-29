@@ -577,19 +577,22 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            // Theia's packer child opens its PARENT process here (runtime.dll RVA
-            // 0x1535B6E) as part of "Initializing dumper". Run standalone there is no
-            // parent, so this returned STATUS_INVALID_CID and Theia aborted with
-            // "Initializing dumper failed: C000000B".
-            //
-            // Vouch for the request by handing back the guest process: the child is the
-            // real game process anyway, and this keeps its dumper init moving so we can
-            // see what it does next.
-            c.win_emu.log.print(color::green,
-                                "[OPENPROC] pid %" PRIu64 " (tid %" PRIu64 ") requested -> vouching with GUEST_PROCESS_HANDLE\n",
-                                static_cast<uint64_t>(id.UniqueProcess), static_cast<uint64_t>(id.UniqueThread));
-            process_handle.write(GUEST_PROCESS_HANDLE);
-            return STATUS_SUCCESS;
+            static const bool dumper_shim = [] {
+                const auto* enabled = std::getenv("SOGEN_DUMPER_SHIM");
+                return enabled && enabled[0] == '1';
+            }();
+            c.win_emu.log.print(color::green, "[OPENPROC] pid %" PRIu64 " (tid %" PRIu64 ") requested -> %s\n",
+                                static_cast<uint64_t>(id.UniqueProcess), static_cast<uint64_t>(id.UniqueThread),
+                                dumper_shim ? "REMOTE_PARENT_PROCESS_HANDLE" : "STATUS_INVALID_CID");
+
+            if (dumper_shim)
+            {
+                process_handle.write(REMOTE_PARENT_PROCESS_HANDLE);
+                return STATUS_SUCCESS;
+            }
+
+            // The emulator hosts a single process; any other pid does not exist.
+            return STATUS_INVALID_CID;
         }
 
         NTSTATUS handle_NtOpenProcessToken(const syscall_context& c, const handle process_handle, const ACCESS_MASK /*desired_access*/,

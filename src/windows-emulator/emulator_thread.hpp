@@ -318,7 +318,7 @@ namespace sogen
         bool apc_alertable{false};
         std::vector<pending_apc> pending_apcs{};
 
-        bool pending_trap_flag_restore{false};
+        bool pending_skip_single_step{false};
 
         std::optional<NTSTATUS> pending_status{};
 

@@ -394,6 +394,37 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (section_handle == PACKER_SHARED_SECTION_HANDLE)
+            {
+                static const bool dumper_shim = [] {
+                    const auto* enabled = std::getenv("SOGEN_DUMPER_SHIM");
+                    return enabled && enabled[0] == '1';
+                }();
+                if (!dumper_shim)
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+
+                if (c.proc.packer_shared_section_backing == 0)
+                {
+                    const auto backing = c.win_emu.memory.allocate_memory(
+                        static_cast<size_t>(PACKER_SHARED_SECTION_SIZE), memory_permission::read_write, false, 0,
+                        memory_region_kind::pagefile_section_view);
+                    if (!backing)
+                    {
+                        return STATUS_NO_MEMORY;
+                    }
+                    c.proc.packer_shared_section_backing = backing;
+                }
+
+                if (view_size)
+                {
+                    view_size.write(PACKER_SHARED_SECTION_SIZE);
+                }
+                base_address.write(c.proc.packer_shared_section_backing);
+                return STATUS_SUCCESS;
+            }
+
             auto* section_entry = c.proc.sections.get(section_handle);
             if (!section_entry)
             {
