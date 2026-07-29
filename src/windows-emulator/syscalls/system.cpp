@@ -252,6 +252,25 @@ namespace sogen
             memcpy(m.FullPathName, full_path.data(), full_path.size() + 1);
         }
 
+        // A driver whose only job is to be seen. Anti-cheat checks the loaded-driver list to
+        // confirm its own kernel component is present, not just that its device answers --
+        // Theia enumerates modules right after talking to \Device\EasyAntiCheat_EOS and
+        // fails the audit (0xC0000244) when the list holds nothing but ntoskrnl.
+        template <typename Traits>
+        void fill_driver_module(RTL_PROCESS_MODULE_INFORMATION<Traits>& m, const std::string_view directory,
+                                const std::string_view file_name, const uint64_t image_base)
+        {
+            memset(&m, 0, sizeof(m));
+            m.ImageBase = static_cast<typename Traits::PVOID>(image_base);
+            m.MappedBase = m.ImageBase;
+            m.ImageSize = 0x20000;
+            m.LoadCount = 1;
+
+            const auto full_path = std::string(directory) + std::string(file_name);
+            m.OffsetToFileName = static_cast<USHORT>(directory.size());
+            memcpy(m.FullPathName, full_path.data(), std::min(full_path.size() + 1, sizeof(m.FullPathName)));
+        }
+
         NTSTATUS handle_system_module_information(const syscall_context& c, const uint64_t system_information,
                                                   const uint32_t system_information_length, const emulator_object<uint32_t> return_length)
         {
@@ -259,8 +278,9 @@ namespace sogen
             using modules_t = RTL_PROCESS_MODULES<Traits>;
             using module_t = RTL_PROCESS_MODULE_INFORMATION<Traits>;
 
+            constexpr uint32_t module_count = 2;
             constexpr auto header_size = offsetof(modules_t, Modules);
-            constexpr auto required = static_cast<uint32_t>(header_size + sizeof(module_t));
+            constexpr auto required = static_cast<uint32_t>(header_size + (module_count * sizeof(module_t)));
 
             if (return_length)
             {
@@ -274,12 +294,27 @@ namespace sogen
 
             modules_t header{};
             memset(&header, 0, sizeof(header));
-            header.NumberOfModules = 1;
+            header.NumberOfModules = module_count;
             c.emu.write_memory(system_information, &header, header_size);
 
-            module_t mod{};
-            fill_ntoskrnl_module<Traits>(mod);
-            c.emu.write_memory(system_information + header_size, &mod, sizeof(mod));
+            module_t kernel{};
+            fill_ntoskrnl_module<Traits>(kernel);
+            kernel.LoadOrderIndex = 0;
+            c.emu.write_memory(system_information + header_size, &kernel, sizeof(kernel));
+
+            // Report the path the driver actually occupies on this host rather than the
+            // canonical system32\drivers one: Theia does not stop at seeing the name in the
+            // list, it opens the file, and a path that does not resolve fails the audit just
+            // as an absent module does. Overridable for hosts that install it elsewhere.
+            static const std::string driver_directory = [] {
+                const auto* value = std::getenv("SOGEN_EAC_DRIVER_DIR");
+                return value ? std::string(value) : std::string(R"(\??\C:\Program Files (x86)\EasyAntiCheat_EOS\)");
+            }();
+
+            module_t anti_cheat{};
+            fill_driver_module<Traits>(anti_cheat, driver_directory, "EasyAntiCheat_EOS.sys", FAKE_KERNEL_BASE + FAKE_KERNEL_SIZE);
+            anti_cheat.LoadOrderIndex = 1;
+            c.emu.write_memory(system_information + header_size + sizeof(module_t), &anti_cheat, sizeof(anti_cheat));
 
             return STATUS_SUCCESS;
         }
@@ -835,7 +870,15 @@ namespace sogen
         NTSTATUS handle_NtQuerySystemInformation(const syscall_context& c, const uint32_t info_class, const uint64_t system_information,
                                                  const uint32_t system_information_length, const emulator_object<uint32_t> return_length)
         {
-            return handle_NtQuerySystemInformationEx(c, info_class, 0, 0, system_information, system_information_length, return_length);
+            const auto status =
+                handle_NtQuerySystemInformationEx(c, info_class, 0, 0, system_information, system_information_length, return_length);
+
+            // Theia makes exactly one of these between talking to the EAC device and giving up
+            // with 0xC0000244, so whichever class this is decides the audit.
+            c.win_emu.log.print(color::green, "[SYSINFO] class=0x%X len=%u -> 0x%X\n", info_class, system_information_length,
+                                static_cast<uint32_t>(status));
+
+            return status;
         }
 
         NTSTATUS handle_NtSetSystemInformation()
