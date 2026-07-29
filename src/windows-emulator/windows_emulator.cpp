@@ -1311,6 +1311,29 @@ namespace sogen
                     {0x159585D, "page fault (sub_20159552B)"},
                 };
 
+                // SOGEN_TF_DEBUG=1 -- Theia's flattened blocks bracket themselves with
+                // pushfq/popfq, so a TF left set in guest RFLAGS at the pushfq is restored
+                // by the matching popfq much later and traps at an unrelated site. Log the
+                // flag where it is captured and where it is restored.
+                if (getenv("SOGEN_TF_DEBUG"))
+                {
+                    static constexpr site tf_sites[] = {
+                        {0x15AAC00, "pushfq (save)"},
+                        {0x15579AB, "popfq (restore)"},
+                    };
+
+                    for (const auto& t : tf_sites)
+                    {
+                        const auto* what = t.what;
+                        this->emu().hook_memory_execution(
+                            mod.image_base + t.rva, [this, what](cpu_interface&, const uint64_t) {
+                                const auto fl = this->emu().reg<uint64_t>(x86_register::rflags);
+                                this->log.info("[TF] %-16s rflags=0x%" PRIx64 " TF=%d\n", what, fl,
+                                               (fl & 0x100) ? 1 : 0);
+                            });
+                    }
+                }
+
                 for (const auto& s : sites)
                 {
                     const auto addr = mod.image_base + s.rva;
@@ -1501,6 +1524,13 @@ namespace sogen
                 {
                     vcpu.thread().pending_skip_single_step = false;
                     return;
+                }
+
+                if (getenv("SOGEN_TF_DEBUG"))
+                {
+                    this->log.info("[TF] #DB rip=0x%" PRIx64 " eflags=0x%x TF=%d\n",
+                                   acting.reg<uint64_t>(x86_register::rip), eflags,
+                                   (eflags & 0x100) ? 1 : 0);
                 }
 
                 if ((eflags & 0x100) != 0)
