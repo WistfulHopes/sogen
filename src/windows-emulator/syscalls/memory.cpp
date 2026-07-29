@@ -698,7 +698,7 @@ namespace sogen
                                     " hi=0x%" PRIx64 "\n",
                                     allocation_bytes, address_requirements.alignment, address_requirements.lowest_address,
                                     address_requirements.highest_address);
-                return STATUS_MEMORY_NOT_ALLOCATED;
+                return STATUS_NO_MEMORY;
             }
 
             base_address.write(potential_base);
@@ -726,11 +726,21 @@ namespace sogen
 
             // Theia's dumper dies with a generic HRESULT_FROM_WIN32 rather than a status, so a
             // failed allocation here is invisible in the error it reports. Log the request.
+            const auto failed_region = c.win_emu.memory.get_region_info(potential_base);
+
             c.win_emu.log.print(color::red,
                                 "[ALLOCFAIL] base=0x%" PRIx64 " requested=0x%" PRIx64 " bytes=0x%" PRIx64
-                                " prot=0x%X type=0x%X\n",
-                                potential_base, requested_base, allocation_bytes, page_protection, allocation_type);
-            return STATUS_MEMORY_NOT_ALLOCATED;
+                                " prot=0x%X type=0x%X occupied=%d kind=%d\n",
+                                potential_base, requested_base, allocation_bytes, page_protection, allocation_type,
+                                failed_region.is_reserved ? 1 : 0, static_cast<int>(failed_region.kind));
+
+            // Windows distinguishes these, and Theia is known to branch on exact statuses
+            // elsewhere. Committing into an address already spoken for -- most often a mapped
+            // image, as when something asks for a page inside user32's view -- is
+            // STATUS_CONFLICTING_ADDRESSES; genuinely running out of room is STATUS_NO_MEMORY.
+            // STATUS_MEMORY_NOT_ALLOCATED belongs to the free path and is not returned here by
+            // the real kernel at all.
+            return failed_region.is_reserved ? STATUS_CONFLICTING_ADDRESSES : STATUS_NO_MEMORY;
         }
 
         NTSTATUS handle_NtAllocateVirtualMemory(const syscall_context& c, const handle process_handle,
