@@ -119,9 +119,9 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            std::optional<std::u16string> get_mapped_filename(const syscall_context& c, const uint64_t base_address)
+            std::optional<std::u16string> get_mapped_filename(windows_emulator& win_emu, const uint64_t base_address)
             {
-                if (const auto mapped_filename = c.win_emu.memory.get_region_mapped_filename(base_address))
+                if (const auto mapped_filename = win_emu.memory.get_region_mapped_filename(base_address))
                 {
                     try
                     {
@@ -133,7 +133,7 @@ namespace sogen
                     }
                 }
 
-                const auto* mod = c.win_emu.mod_manager.find_by_address(base_address);
+                const auto* mod = win_emu.mod_manager.find_by_address(base_address);
                 if (!mod || mod->module_path.empty())
                 {
                     return std::nullopt;
@@ -171,6 +171,50 @@ namespace sogen
             // memory manager too.
             if (process_handle == REMOTE_PARENT_PROCESS_HANDLE && c.win_emu.parent())
             {
+                // Identifying the modules in the target is part of building a dump, so the
+                // basic class alone is not enough: answering only that one leaves Theia's
+                // dumper unable to proceed ("Internal error #4").
+                if (info_class == MemoryImageInformation)
+                {
+                    const auto* mod = c.win_emu.parent()->mod_manager.find_by_address(base_address);
+                    if (!mod)
+                    {
+                        return STATUS_INVALID_ADDRESS;
+                    }
+
+                    return handle_query<MEMORY_IMAGE_INFORMATION64>(
+                        c.emu, memory_information, static_cast<uint32_t>(memory_information_length),
+                        emulator_object<uint32_t>{c.emu, return_length.value()},
+                        [&](MEMORY_IMAGE_INFORMATION64& info) {
+                            info.ImageBase = mod->image_base;
+                            info.SizeOfImage = static_cast<int64_t>(mod->size_of_image);
+                            info.ImageFlags = 0;
+                        });
+                }
+
+                if (info_class == MemoryRegionInformation || info_class == MemoryRegionInformationEx)
+                {
+                    const auto parent_region = c.win_emu.parent()->memory.get_region_info(base_address);
+                    if (!parent_region.is_reserved)
+                    {
+                        return STATUS_INVALID_ADDRESS;
+                    }
+
+                    return handle_query<MEMORY_REGION_INFORMATION64>(
+                        c.emu, memory_information, static_cast<uint32_t>(memory_information_length),
+                        emulator_object<uint32_t>{c.emu, return_length.value()},
+                        [&](MEMORY_REGION_INFORMATION64& info) {
+                            memset(&info, 0, sizeof(info));
+                            info.AllocationBase = parent_region.allocation_base;
+                            info.AllocationProtect =
+                                map_emulator_to_nt_protection(parent_region.initial_permissions);
+                            info.RegionType =
+                                memory_region_policy::to_memory_region_information_type(parent_region.kind);
+                            info.RegionSize = static_cast<int64_t>(parent_region.allocation_length);
+                            info.CommitSize = static_cast<int64_t>(parent_region.length);
+                        });
+                }
+
                 if (info_class != MemoryBasicInformation)
                 {
                     return STATUS_NOT_SUPPORTED;
@@ -326,7 +370,7 @@ namespace sogen
 
             if (info_class == MemoryMappedFilenameInformation)
             {
-                const auto mapped_filename = get_mapped_filename(c, base_address);
+                const auto mapped_filename = get_mapped_filename(c.win_emu, base_address);
                 if (!mapped_filename)
                 {
                     return STATUS_INVALID_ADDRESS;
