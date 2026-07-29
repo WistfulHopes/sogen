@@ -165,6 +165,11 @@ namespace sogen
                 }
 
                 const auto region = c.win_emu.parent()->memory.get_region_info(base_address);
+
+                c.win_emu.log.print(color::green, "[PARENTQUERY] 0x%" PRIx64 " -> base=0x%" PRIx64 " len=0x%" PRIx64 " kind=%u committed=%d\n",
+                                    base_address, region.start, static_cast<uint64_t>(region.length),
+                                    static_cast<unsigned>(region.kind), region.is_committed ? 1 : 0);
+
                 return handle_query<MEMORY_BASIC_INFORMATION64>(
                     c.emu, memory_information, static_cast<uint32_t>(memory_information_length),
                     emulator_object<uint32_t>{c.emu, return_length.value()}, [&](MEMORY_BASIC_INFORMATION64& info) {
@@ -739,6 +744,9 @@ namespace sogen
                 {
                     c.emu.write_memory(buffer, data.data(), copied);
                 }
+
+                c.win_emu.log.print(color::green, "[PARENTREAD] 0x%" PRIx64 " len=%u -> %zu bytes\n", base_address,
+                                    number_of_bytes_to_read, copied);
 
                 number_of_bytes_read.try_write(static_cast<ULONG>(copied));
                 return copied == data.size() ? STATUS_SUCCESS : STATUS_PARTIAL_COPY;
