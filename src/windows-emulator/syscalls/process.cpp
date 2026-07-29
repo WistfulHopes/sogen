@@ -15,6 +15,41 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
+                // A dumper reads its target's PEB to locate the image base, so the parent handle
+                // has to answer with the parent emulator's own PEB and pid.
+                if (process_handle == REMOTE_PARENT_PROCESS_HANDLE && c.win_emu.parent())
+                {
+                    if (info_class != ProcessBasicInformation)
+                    {
+                        return STATUS_NOT_SUPPORTED;
+                    }
+
+                    auto& parent = *c.win_emu.parent();
+                    const auto init_parent_info = [&](PROCESS_BASIC_INFORMATION64& basic_info) {
+                        basic_info = {};
+                        basic_info.ExitStatus = STATUS_PENDING;
+                        basic_info.PebBaseAddress = parent.process.peb64.value();
+                        basic_info.UniqueProcessId = parent.process.process_id;
+                    };
+
+                    switch (process_information_length)
+                    {
+                    case sizeof(PROCESS_BASIC_INFORMATION64):
+                        return handle_query<PROCESS_BASIC_INFORMATION64>(c.emu, process_information, process_information_length,
+                                                                         return_length, init_parent_info);
+                    case sizeof(PROCESS_EXTENDED_BASIC_INFORMATION):
+                        return handle_query<PROCESS_EXTENDED_BASIC_INFORMATION>(
+                            c.emu, process_information, process_information_length, return_length,
+                            [&](PROCESS_EXTENDED_BASIC_INFORMATION& ext) {
+                                ext = {};
+                                ext.Size = sizeof(PROCESS_EXTENDED_BASIC_INFORMATION);
+                                init_parent_info(ext.BasicInfo);
+                            });
+                    default:
+                        return STATUS_INFO_LENGTH_MISMATCH;
+                    }
+                }
+
                 // The synthetic Steam process: report it as alive so a guest steam_api's GetExitCodeProcess
                 // liveness check succeeds. Only ProcessBasicInformation is meaningful; any other class is
                 // rejected cleanly rather than falling through to the default (which stops the emulator).

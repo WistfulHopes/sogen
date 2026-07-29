@@ -60,8 +60,13 @@ namespace sogen
             case memory_operation::read:
                 return 0;
             case memory_operation::write:
-            case memory_operation::exec:
                 return 1;
+            case memory_operation::exec:
+                // EXCEPTION_ACCESS_VIOLATION's first parameter is 0 read / 1 write / 8 DEP.
+                // Reporting an execute fault as a write is not just cosmetic: page-level
+                // protections (Theia) decrypt only when this reads 8, and treat anything else
+                // as a genuine violation.
+                return 8;
             }
         }
 

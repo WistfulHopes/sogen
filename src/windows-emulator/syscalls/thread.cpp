@@ -675,6 +675,31 @@ namespace sogen
                     }
                 }
 
+                // Once the child has posted, re-arm a watchpoint over the shared view every so
+                // often. Each arming catches exactly one parent access and disarms, so this
+                // samples what the parent's spin actually touches without permanently
+                // trapping every access.
+                static const bool watch_section = [] {
+                    const auto* enabled = std::getenv("SOGEN_WATCH_SECTION");
+                    return enabled && enabled[0] == '1';
+                }();
+
+                if (watch_section && request_pending)
+                {
+                    static uint64_t rearm = 0;
+                    if ((++rearm % 64) == 0)
+                    {
+                        for (auto& [sec_handle, sec] : c.proc.sections)
+                        {
+                            if (sec.backing_address && c.win_emu.shared_section_backings.contains(sec_handle))
+                            {
+                                c.win_emu.arm_section_watch(sec.backing_address,
+                                                            static_cast<size_t>(page_align_up(sec.maximum_size)));
+                            }
+                        }
+                    }
+                }
+
                 static uint64_t parent_yields = 0;
                 if ((++parent_yields % (request_pending ? ratio : 1)) == 0)
                 {
@@ -736,6 +761,44 @@ namespace sogen
                                                 thread.apc_alertable ? 1 : 0, thread.pending_apcs.size());
                         }
                     }
+                }
+            }
+
+            // One-shot survey of the main image's page protections. Theia marks executable
+            // pages PAGE_NOACCESS and decrypts them on an execute fault, so the count of
+            // inaccessible pages is the size of the job a page sweep would have.
+            {
+                static bool surveyed = false;
+                if (!surveyed && c.win_emu.mod_manager.executable)
+                {
+                    surveyed = true;
+                    const auto& exe = *c.win_emu.mod_manager.executable;
+
+                    size_t readable = 0;
+                    size_t inaccessible = 0;
+                    size_t uncommitted = 0;
+
+                    for (uint64_t page = exe.image_base; page < exe.image_base + exe.size_of_image; page += 0x1000)
+                    {
+                        const auto region = c.win_emu.memory.get_region_info(page);
+                        if (!region.is_committed)
+                        {
+                            ++uncommitted;
+                        }
+                        else if (region.permissions.common == memory_permission::none)
+                        {
+                            ++inaccessible;
+                        }
+                        else
+                        {
+                            ++readable;
+                        }
+                    }
+
+                    c.win_emu.log.print(color::pink,
+                                        "[PAGESURVEY] %s base=0x%" PRIx64 " size=0x%" PRIx64
+                                        " -> readable=%zu inaccessible=%zu uncommitted=%zu\n",
+                                        exe.name.c_str(), exe.image_base, exe.size_of_image, readable, inaccessible, uncommitted);
                 }
             }
 

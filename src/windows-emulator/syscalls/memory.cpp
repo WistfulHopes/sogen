@@ -362,6 +362,24 @@ namespace sogen
                                                const emulator_object<uint32_t> bytes_to_protect, const uint32_t protection,
                                                const emulator_object<uint32_t> old_protection)
         {
+            if (process_handle == REMOTE_PARENT_PROCESS_HANDLE && c.win_emu.parent())
+            {
+                const auto start = page_align_down(base_address.read());
+                const auto length = static_cast<size_t>(page_align_up(bytes_to_protect.read()));
+                const auto requested = map_nt_to_emulator_protection(protection);
+
+                nt_memory_permission previous{};
+                if (!c.win_emu.parent()->memory.protect_memory(start, length, requested, &previous))
+                {
+                    return STATUS_INVALID_ADDRESS;
+                }
+
+                old_protection.write_if_valid(map_emulator_to_nt_protection(previous));
+                base_address.write(start);
+                bytes_to_protect.write(static_cast<uint32_t>(length));
+                return STATUS_SUCCESS;
+            }
+
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 return STATUS_NOT_SUPPORTED;
@@ -744,6 +762,20 @@ namespace sogen
                                              const emulator_object<ULONG> number_of_bytes_write)
         {
             number_of_bytes_write.try_write(0);
+
+            if (process_handle == REMOTE_PARENT_PROCESS_HANDLE && c.win_emu.parent())
+            {
+                std::vector<uint8_t> data(number_of_bytes_to_write);
+                c.emu.read_memory(buffer, data.data(), data.size());
+
+                if (!c.win_emu.parent()->memory.try_write_memory(base_address, data.data(), data.size()))
+                {
+                    return STATUS_PARTIAL_COPY;
+                }
+
+                number_of_bytes_write.try_write(number_of_bytes_to_write);
+                return STATUS_SUCCESS;
+            }
 
             if (!c.proc.is_current_process_handle(process_handle))
             {

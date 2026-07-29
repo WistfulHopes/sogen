@@ -822,6 +822,25 @@ namespace sogen
         return child_ptr;
     }
 
+    void windows_emulator::arm_section_watch(const uint64_t address, const size_t length)
+    {
+        const auto region = this->memory.get_region_info(address);
+
+        auto& watch = this->watched_sections_[address];
+        if (watch.armed)
+        {
+            return;
+        }
+
+        watch.length = length;
+        watch.original = region.permissions;
+
+        if (this->memory.protect_memory(address, length, memory_permission::none))
+        {
+            watch.armed = true;
+        }
+    }
+
     bool windows_emulator::has_live_children() const
     {
         return std::ranges::any_of(this->children_, [](const auto& child) { return !child->process.exit_status.has_value(); });
@@ -1488,6 +1507,33 @@ namespace sogen
                 if (actual_gs_base != required_gs_base)
                 {
                     acting.set_segment_base(x86_register::gs, required_gs_base);
+                    return memory_violation_continuation::restart;
+                }
+            }
+
+            // Watchpoint on a shared section: the page is deliberately made inaccessible so the
+            // first touch faults here. Report who touched it and what offset, restore access,
+            // and restart the instruction -- the guest never sees an exception. This is the
+            // only way to observe the parent's polling: it reads plain memory, issuing no
+            // syscalls, and MMIO-backing the view instead makes WHP fail to emulate the access.
+            if (!this->watched_sections_.empty())
+            {
+                for (auto& [watch_base, watch] : this->watched_sections_)
+                {
+                    if (address < watch_base || address >= watch_base + watch.length)
+                    {
+                        continue;
+                    }
+
+                    this->log.print(color::pink, "[WATCH] %s offset 0x%" PRIx64 " from rip 0x%" PRIx64 " (%s)\n",
+                                    operation == memory_operation::write ? "WRITE" : "read ", address - watch_base,
+                                    acting.read_instruction_pointer(),
+                                    this->mod_manager.find_by_address(acting.read_instruction_pointer())
+                                        ? this->mod_manager.find_by_address(acting.read_instruction_pointer())->name.c_str()
+                                        : "?");
+
+                    this->memory.protect_memory(watch_base, watch.length, watch.original);
+                    watch.armed = false;
                     return memory_violation_continuation::restart;
                 }
             }
