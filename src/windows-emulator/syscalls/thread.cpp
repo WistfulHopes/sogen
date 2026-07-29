@@ -795,41 +795,59 @@ namespace sogen
                     // Parent and child never execute at the same time, so sampling the mailbox
                     // either side of the slice attributes every change to one of them. Which
                     // side clears the child's request byte is the whole question.
+                    struct rpc_frame
+                    {
+                        uint8_t doorbell{};
+                        uint32_t opcode{};
+                        uint64_t arg0{}, arg1{}, reply0{};
+                        bool operator==(const rpc_frame&) const = default;
+                    };
                     const auto sample = [&c] {
-                        std::array<uint8_t, 8> bytes{};
+                        rpc_frame f{};
                         for (auto& [sec_handle, sec] : c.proc.sections)
                         {
                             if (!sec.backing_address || !c.win_emu.is_packer_section(sec_handle))
                             {
                                 continue;
                             }
+                            const auto base = sec.backing_address;
                             try
                             {
-                                c.emu.read_memory(sec.backing_address, bytes.data(), bytes.size());
+                                f.doorbell = c.emu.read_memory<uint8_t>(base);
+                                f.opcode = c.emu.read_memory<uint32_t>(base + 0x40);
+                                f.arg0 = c.emu.read_memory<uint64_t>(base + 0x80);
+                                f.arg1 = c.emu.read_memory<uint64_t>(base + 0x88);
+                                f.reply0 = c.emu.read_memory<uint64_t>(base + 0x1000);
                             }
                             catch (...)
                             {
                             }
                         }
-                        return bytes;
+                        return f;
                     };
 
                     const auto before = sample();
                     c.win_emu.run_children_slice(CHILD_SLICE_INSTRUCTIONS);
                     const auto after = sample();
 
-                    static std::array<uint8_t, 8> previous_after{};
+                    static rpc_frame previous_after{};
                     static bool have_previous = false;
+
+                    const auto dump_frame = [&c](const char* who, const rpc_frame& a, const rpc_frame& b) {
+                        c.win_emu.log.print(
+                            color::pink, "[HANDSHAKE] %s doorbell 0x%02X->0x%02X op=0x%X args=0x%llX,0x%llX reply=0x%llX\n", who,
+                            a.doorbell, b.doorbell, b.opcode, static_cast<unsigned long long>(b.arg0),
+                            static_cast<unsigned long long>(b.arg1), static_cast<unsigned long long>(b.reply0));
+                    };
 
                     if (have_previous && previous_after != before)
                     {
-                        c.win_emu.log.print(color::pink, "[WROTE] PARENT changed mailbox [0]: %02x -> %02x\n", previous_after[0],
-                                            before[0]);
+                        dump_frame("PARENT", previous_after, before);
                     }
 
                     if (before != after)
                     {
-                        c.win_emu.log.print(color::pink, "[WROTE] CHILD changed mailbox [0]: %02x -> %02x\n", before[0], after[0]);
+                        dump_frame("CHILD ", before, after);
                     }
 
                     previous_after = after;

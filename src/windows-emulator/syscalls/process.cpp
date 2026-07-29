@@ -143,10 +143,10 @@ namespace sogen
                 const emulator_object<PROCESS_MITIGATION_POLICY> policy_obj{c.emu, process_information};
                 const auto policy = policy_obj.read();
 
-                // We only support querying ProcessDynamicCodePolicy
-                if (policy != ProcessDynamicCodePolicy)
+                if (policy != ProcessDynamicCodePolicy && getenv("SOGEN_QVM_DEBUG"))
                 {
-                    return STATUS_NOT_SUPPORTED;
+                    c.win_emu.log.print(color::cyan, "[QIP] ProcessMitigationPolicy sub-policy=%u -> default (0)\n",
+                                        static_cast<unsigned>(policy));
                 }
 
                 return handle_query<PROCESS_MITIGATION_POLICY_RAW_DATA>(c.emu, process_information, process_information_length,
@@ -670,6 +670,40 @@ namespace sogen
 
         NTSTATUS handle_NtTerminateProcess(const syscall_context& c, const handle process_handle, NTSTATUS exit_status)
         {
+            const auto log_abort_site = [&](const char* what) {
+                const auto resolve = [&](uint64_t a, char* out, size_t n) {
+                    auto* m = c.win_emu.mod_manager.find_by_address(a);
+                    if (m)
+                        snprintf(out, n, "%s+0x%llX", m->name.c_str(), static_cast<unsigned long long>(a - m->image_base));
+                    else
+                        snprintf(out, n, "0x%llX", static_cast<unsigned long long>(a));
+                };
+                char site[160];
+                resolve(c.emu.read_instruction_pointer(), site, sizeof(site));
+                c.win_emu.log.print(color::red, "[ABORTSITE] %s exit=0x%X site=%s\n", what,
+                                    static_cast<uint32_t>(exit_status), site);
+                try
+                {
+                    const auto sp = c.emu.read_stack_pointer();
+                    int printed = 0;
+                    for (int i = 0; i < 96 && printed < 14; ++i)
+                    {
+                        const auto val = c.emu.read_memory<uint64_t>(sp + static_cast<uint64_t>(i) * 8);
+                        auto* m = c.win_emu.mod_manager.find_by_address(val);
+                        if (m && m->contains(val)) // resolvable into a mapped module -> likely a return address
+                        {
+                            char frame[160];
+                            resolve(val, frame, sizeof(frame));
+                            c.win_emu.log.print(color::red, "[ABORTSITE]   bt[sp+0x%X] %s\n", i * 8, frame);
+                            ++printed;
+                        }
+                    }
+                }
+                catch (...)
+                {
+                }
+            };
+
             if (process_handle == 0)
             {
                 for (auto& thread : c.proc.threads | std::views::values)
@@ -687,6 +721,7 @@ namespace sogen
             {
                 // The exit status names the reason Theia gave up (0xDEAD is its own
                 // "handshake failed" code), so it is worth surfacing on every run.
+                log_abort_site("SELF-terminate");
                 c.win_emu.log.print(color::red, "[EXITPROC] NtTerminateProcess exit_status=0x%X\n",
                                     static_cast<uint32_t>(exit_status));
                 c.proc.exit_status = exit_status;
@@ -701,6 +736,7 @@ namespace sogen
             if (process_handle == REMOTE_PARENT_PROCESS_HANDLE && c.win_emu.parent())
             {
                 auto& parent = *c.win_emu.parent();
+                log_abort_site("child->PARENT");
                 c.win_emu.log.print(color::red, "[EXITPROC] child terminating PARENT, exit_status=0x%X\n",
                                     static_cast<uint32_t>(exit_status));
                 parent.process.exit_status = exit_status;
@@ -710,6 +746,7 @@ namespace sogen
 
             if (process_handle == PACKER_CHILD_PROCESS_HANDLE)
             {
+                log_abort_site("parent->CHILD");
                 c.win_emu.log.print(color::red, "[EXITPROC] parent terminating CHILD, exit_status=0x%X\n",
                                     static_cast<uint32_t>(exit_status));
                 for (auto& child : c.win_emu.children())
