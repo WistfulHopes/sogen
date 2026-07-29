@@ -1379,6 +1379,33 @@ namespace sogen
                 // returns that status, so it is Theia's own check; several of these are
                 // preceded by `mov eax,[rbx]; and eax,3`, a state word masked to two bits.
                 // Whichever fires names the failing check and rbx is the state object.
+                // SOGEN_HR_BP=1 -- Theia has no literal 0x8007001F; it builds the dump error as
+                // HRESULT_FROM_WIN32(GetLastError()), and 12 sites load the 0x80070000 base (7 in
+                // plaintext packer1). No syscall in the run returns a status that maps to
+                // ERROR_GEN_FAILURE (31) any more, so the error is set somewhere we cannot see
+                // from statuses. Whichever of these fires is where the code is assembled.
+                if (getenv("SOGEN_HR_BP"))
+                {
+                    static constexpr uint64_t hr_sites[] = {
+                        0x882CBE, 0x95F8AB, 0x95FBFC, 0x95FD01, 0x966BBB, 0x969ADE, 0x969B01,
+                    };
+
+                    for (const auto rva : hr_sites)
+                    {
+                        this->emu().hook_memory_execution(
+                            mod.image_base + rva, [this, rva](cpu_interface&, const uint64_t) {
+                                this->log.print(color::pink,
+                                                "[HR] site +0x%" PRIx64 " rax=0x%" PRIx64 " rcx=0x%" PRIx64
+                                                " rdx=0x%" PRIx64 " r8=0x%" PRIx64 "\n",
+                                                rva, this->emu().reg<uint64_t>(x86_register::rax),
+                                                this->emu().reg<uint64_t>(x86_register::rcx),
+                                                this->emu().reg<uint64_t>(x86_register::rdx),
+                                                this->emu().reg<uint64_t>(x86_register::r8));
+                            });
+                    }
+                    this->log.info("[HR] armed %zu sites\n", std::size(hr_sites));
+                }
+
                 if (getenv("SOGEN_C0210_BP"))
                 {
                     static constexpr uint64_t c0210_sites[] = {
