@@ -1321,9 +1321,14 @@ namespace sogen
             // goes straight to formatting its failure message, so whatever module it fails to
             // find is what the dump needs. LdrGetDllHandle's third argument (r8) is the
             // PUNICODE_STRING name; log it rather than guessing at dbghelp/dbgcore.
-            // Armed from runtime.dll's load, not ntdll's: ntdll is mapped during process setup,
-            // before on_module_load callbacks exist, so a branch keyed on its own load never runs.
-            if (mod.name == "runtime.dll" && getenv("SOGEN_LDRNAME"))
+            // Arm at the first module load where ntdll is available, rather than keying on a
+            // specific module. In the parent, runtime.dll loads long after ntdll; in the child
+            // runtime.dll IS the executable and map_main_modules maps it BEFORE ntdll, so a
+            // runtime.dll-keyed branch left the child unhooked -- and the dumper runs there.
+            // Per-emulator, not per-process: a plain `static` here is shared by the parent and
+            // child instances, so only whichever loaded first would ever arm.
+            static std::set<const windows_emulator*> ldr_armed;
+            if (this->mod_manager.ntdll && getenv("SOGEN_LDRNAME") && ldr_armed.emplace(this).second)
             {
                 const auto* ntdll_mod = this->mod_manager.ntdll;
                 if (const auto addr = ntdll_mod ? ntdll_mod->find_export("LdrGetDllHandle") : 0)
