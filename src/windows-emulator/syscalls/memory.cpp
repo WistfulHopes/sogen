@@ -170,11 +170,26 @@ namespace sogen
                     emulator_object<uint32_t>{c.emu, return_length.value()}, [&](MEMORY_BASIC_INFORMATION64& info) {
                         info.BaseAddress = region.start;
                         info.AllocationBase = region.allocation_base;
-                        info.AllocationProtect = 0;
+                        info.AllocationProtect = map_emulator_to_nt_protection(region.initial_permissions);
                         info.RegionSize = region.length;
                         info.State = region.is_committed ? MEM_COMMIT : (region.is_reserved ? MEM_RESERVE : MEM_FREE);
                         info.Protect = map_emulator_to_nt_protection(region.permissions);
-                        info.Type = MEM_PRIVATE;
+
+                        // A dumper decides what to write out from Type: reporting everything as
+                        // private hides which regions are the mapped images it is after.
+                        switch (region.kind)
+                        {
+                        case memory_region_kind::section_image:
+                            info.Type = MEM_IMAGE;
+                            break;
+                        case memory_region_kind::file_section_view:
+                        case memory_region_kind::pagefile_section_view:
+                            info.Type = MEM_MAPPED;
+                            break;
+                        default:
+                            info.Type = MEM_PRIVATE;
+                            break;
+                        }
                     });
             }
 
@@ -698,15 +713,35 @@ namespace sogen
             {
                 auto& parent_memory = c.win_emu.parent()->memory;
 
+                // Copy page by page and stop at the first unreadable one, reporting how much
+                // was transferred. A dumper reads large spans that routinely straddle an
+                // unmapped page; failing the whole request loses the readable part, which is
+                // not what Windows does and not what the caller can recover from.
+                constexpr size_t page_size = 0x1000;
                 std::vector<uint8_t> data(number_of_bytes_to_read);
-                if (!parent_memory.try_read_memory(base_address, data.data(), data.size()))
+
+                size_t copied = 0;
+                while (copied < data.size())
                 {
-                    return STATUS_PARTIAL_COPY;
+                    const auto address = base_address + copied;
+                    const auto page_remainder = page_size - (address % page_size);
+                    const auto chunk = std::min<size_t>(page_remainder, data.size() - copied);
+
+                    if (!parent_memory.try_read_memory(address, data.data() + copied, chunk))
+                    {
+                        break;
+                    }
+
+                    copied += chunk;
                 }
 
-                c.emu.write_memory(buffer, data.data(), data.size());
-                number_of_bytes_read.try_write(number_of_bytes_to_read);
-                return STATUS_SUCCESS;
+                if (copied)
+                {
+                    c.emu.write_memory(buffer, data.data(), copied);
+                }
+
+                number_of_bytes_read.try_write(static_cast<ULONG>(copied));
+                return copied == data.size() ? STATUS_SUCCESS : STATUS_PARTIAL_COPY;
             }
 
             if (!c.proc.is_current_process_handle(process_handle))
