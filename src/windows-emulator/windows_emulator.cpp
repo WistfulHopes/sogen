@@ -1283,6 +1283,69 @@ namespace sogen
                 this->install_section_first_execution_hook(mod, i);
             }
 
+            // ---- Theia container/page key capture ------------------------------------
+            // The page cipher is fully solved offline (tools/dumper/theia_blake3.h): it is
+            // BLAKE3 compress, 7 rounds, zero message block, keyed by a 33-byte struct
+            // (32-byte cv + block_len at +32, flags = that byte ^ 0x1B). What is NOT known
+            // is how that cv is derived -- it changes per 4 KB page, and ~1.3G candidates
+            // at align 1 proved it is stored in no shipped file and no memory snapshot.
+            //
+            // Scanning for it is therefore hopeless, but reading it is trivial: exactly TWO
+            // instructions in the whole 61 MB of runtime.dll call the cipher, and rcx holds
+            // the key struct at both. Hooking them here is undetectable in a way no native
+            // technique is -- Theia's dispatched block opens with `pushfq` so a trap flag is
+            // visible to it, and int3 patches its own code. An emulator execution hook
+            // exists entirely outside the guest.
+            //
+            // Init decrypts pages just to run (the game exe's .text ships as ciphertext), so
+            // this fires long before any pak is opened -- it does not need the game to boot.
+            if (mod.name == "runtime.dll")
+            {
+                struct site
+                {
+                    uint64_t rva;
+                    const char* what;
+                };
+                static constexpr site sites[] = {
+                    {0x1559246, "container (sub_201559147)"},
+                    {0x159585D, "page fault (sub_20159552B)"},
+                };
+
+                for (const auto& s : sites)
+                {
+                    const auto addr = mod.image_base + s.rva;
+                    const auto* what = s.what;
+                    this->emu().hook_memory_execution(addr, [this, addr, what](cpu_interface& cpu,
+                                                                               const uint64_t) {
+                        const auto key_ptr = this->emu().reg(x86_register::rcx);
+
+                        std::array<uint8_t, 33> key{};
+                        if (!this->memory.try_read_memory(key_ptr, key.data(), key.size()))
+                        {
+                            this->log.error("[THEIAKEY] %s: rcx=0x%" PRIx64 " unreadable\n", what, key_ptr);
+                            return;
+                        }
+
+                        std::string hex;
+                        hex.reserve(key.size() * 2);
+                        for (const auto b : key)
+                        {
+                            char tmp[3];
+                            (void)snprintf(tmp, sizeof(tmp), "%02x", b);
+                            hex += tmp;
+                        }
+
+                        const auto dst = this->emu().reg(x86_register::rdx);
+                        const auto src = this->emu().reg(x86_register::r8);
+                        this->log.info("[THEIAKEY] %s cv+k=%s dst=0x%" PRIx64 " src=0x%" PRIx64 "\n", what,
+                                       hex.c_str(), dst, src);
+                        (void)cpu;
+                        (void)addr;
+                    });
+                    this->log.info("[THEIAKEY] armed %s at 0x%" PRIx64 "\n", s.what, addr);
+                }
+            }
+
             // ---- Theia clean-DLL hook-sweep diagnostic -------------------------------
             // Theia maps pristine copies of ntdll/kernel32/kernelbase/user32/gdi32 from
             // \KnownDlls and diffs them against the already-loaded copies to detect
