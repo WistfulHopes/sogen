@@ -2790,7 +2790,8 @@ namespace sogen
                     // has no static xref -- walk the guest stack instead and report every
                     // return address that lands inside runtime.dll. Those frames are the
                     // Theia code that decided to show the box, i.e. the check we must satisfy.
-                    if (utf8.find("supposed to be here") != std::string::npos)
+                    if (utf8.find("supposed to be here") != std::string::npos ||
+                        utf8.find("Internal error") != std::string::npos)
                     {
                         static bool reported = false;
                         if (!reported)
