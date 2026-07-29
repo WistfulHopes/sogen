@@ -313,10 +313,32 @@ namespace sogen
 
             if (info_class == MemoryImageExtensionInformation)
             {
-                c.win_emu.log.error("NtQueryVirtualMemory: MemoryImageExtensionInformation not implemented (base 0x%" PRIx64
-                                    ")\n",
-                                    base_address);
-                return STATUS_NOT_SUPPORTED;
+                // MEMORY_IMAGE_EXTENSION_INFORMATION: USHORT ExtensionImageBaseRva, USHORT
+                // ExtensionImageSize, ULONG Flags, ULONG Reserved[4] -- 0x18 bytes, which is
+                // the size callers ask for. Images built without a hotpatch extension have
+                // none, so an all-zero answer is the correct one rather than a failure.
+                const auto* mod = c.win_emu.mod_manager.find_by_address(base_address);
+                if (!mod)
+                {
+                    return STATUS_INVALID_ADDRESS;
+                }
+
+                constexpr uint32_t extension_info_size = 0x18;
+
+                if (return_length)
+                {
+                    return_length.write(extension_info_size);
+                }
+
+                if (memory_information_length < extension_info_size)
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                const std::array<uint8_t, extension_info_size> empty{};
+                c.emu.write_memory(memory_information, empty.data(), empty.size());
+
+                return STATUS_SUCCESS;
             }
 
             if (base_address < MIN_ALLOCATION_ADDRESS || base_address >= MAX_ALLOCATION_END_EXCL)
