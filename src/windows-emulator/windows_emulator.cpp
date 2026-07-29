@@ -1421,6 +1421,32 @@ namespace sogen
                     }
                 });
 
+                // Which abort path reports. 08AB7C0 has eight callers, all shaped
+                // report(record_ptr, context_ptr, 0, 0) with the two pointers loaded from a
+                // struct rather than built from a live exception -- 08BD5F6 shows the logic
+                // plainly: `call rdx; test eax,eax; je report`. So a check returning zero
+                // reports a pre-built record, which is why the reported code, C0000005 with an
+                // execute parameter at the image base, looks like a placeholder: it is one.
+                // Naming the site that fires names the check that failed.
+                {
+                    static constexpr uint64_t report_sites[] = {
+                        0x897934, 0x897E28, 0x8BD5F6, 0x8ED28A, 0x8EFF1D, 0x8FC7FA, 0x972074, 0x98AB84,
+                    };
+
+                    for (const auto rva : report_sites)
+                    {
+                        this->emu().hook_memory_execution(
+                            mod.image_base + rva, [this, rva](cpu_interface&, const uint64_t) {
+                                this->log.print(color::red,
+                                                "[ABORT] report site +0x%" PRIx64 " rcx=0x%" PRIx64 " rdx=0x%" PRIx64
+                                                " rsi=0x%" PRIx64 "\n",
+                                                rva, this->emu().reg<uint64_t>(x86_register::rcx),
+                                                this->emu().reg<uint64_t>(x86_register::rdx),
+                                                this->emu().reg<uint64_t>(x86_register::rsi));
+                            });
+                    }
+                }
+
                 // Theia's tripwire verdict. RUNTIME_FUNCTION[427] at 08DB880 is 35 bytes:
                 //   mov qword [rbp-8], 0 / call 0898380 / mov rax, [rbp-8] / ret
                 // 0898380 is the tripwire (xor eax,eax; mov eax,[rax]; mov eax,0FFFh; syscall),
