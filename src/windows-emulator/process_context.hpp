@@ -552,6 +552,12 @@ namespace sogen
         // The process keeps id 4; threads take 8, 12, 16, ... Real Windows never hands out tiny or
         // non-4-aligned ids, and some code (e.g. CEG-style anti-tamper) relies on that.
         static constexpr uint32_t process_id = 4;
+
+        // A child must be able to name its parent: Windows reports it in
+        // PROCESS_BASIC_INFORMATION::InheritedFromUniqueProcessId, and Theia's dumper reads it
+        // to open the process it is meant to dump. Left 0 for a root process, as Windows does
+        // once the parent has exited.
+        uint32_t parent_process_id{};
         uint32_t spawned_thread_count{0};
         handle_store<handle_types::thread, emulator_thread> threads{};
 

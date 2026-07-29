@@ -119,9 +119,9 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            std::optional<std::u16string> get_mapped_filename(const syscall_context& c, const uint64_t base_address)
+            std::optional<std::u16string> get_mapped_filename(windows_emulator& win_emu, const uint64_t base_address)
             {
-                if (const auto mapped_filename = c.win_emu.memory.get_region_mapped_filename(base_address))
+                if (const auto mapped_filename = win_emu.memory.get_region_mapped_filename(base_address))
                 {
                     try
                     {
@@ -133,7 +133,7 @@ namespace sogen
                     }
                 }
 
-                const auto* mod = c.win_emu.mod_manager.find_by_address(base_address);
+                const auto* mod = win_emu.mod_manager.find_by_address(base_address);
                 if (!mod || mod->module_path.empty())
                 {
                     return std::nullopt;
@@ -154,27 +154,106 @@ namespace sogen
                                              const uint32_t info_class, const uint64_t memory_information,
                                              const uint64_t memory_information_length, const emulator_object<uint64_t> return_length)
         {
+            // SOGEN_QVM_DEBUG=1 -- Theia's init can sink into an unbounded
+            // NtQueryVirtualMemory loop that returns mostly 0xC000000D, and a status code
+            // alone does not say which info class it wanted. Inferring from statuses has
+            // already cost several rounds on this project; logging the actual arguments has
+            // resolved every one of them immediately.
+            static const bool qvm_debug = getenv("SOGEN_QVM_DEBUG") != nullptr;
+            if (qvm_debug)
+            {
+                c.win_emu.log.print(color::cyan,
+                                    "[QVM] h=0x%" PRIx64 " cur=%d parent=0x%" PRIx64 " class=%u addr=0x%" PRIx64 "\n",
+                                    process_handle.bits, c.proc.is_current_process_handle(process_handle) ? 1 : 0,
+                                    static_cast<uint64_t>(REMOTE_PARENT_PROCESS_HANDLE.bits),
+                                    static_cast<unsigned>(info_class), base_address);
+            }
+
             // A dumper walks its target's address space with MemoryBasicInformation before
             // reading it, so the parent handle has to answer region queries from the parent's
             // memory manager too.
             if (process_handle == REMOTE_PARENT_PROCESS_HANDLE && c.win_emu.parent())
             {
+                // Identifying the modules in the target is part of building a dump, so the
+                // basic class alone is not enough: answering only that one leaves Theia's
+                // dumper unable to proceed ("Internal error #4").
+                if (info_class == MemoryImageInformation)
+                {
+                    const auto* mod = c.win_emu.parent()->mod_manager.find_by_address(base_address);
+                    if (!mod)
+                    {
+                        return STATUS_INVALID_ADDRESS;
+                    }
+
+                    return handle_query<MEMORY_IMAGE_INFORMATION64>(
+                        c.emu, memory_information, static_cast<uint32_t>(memory_information_length),
+                        emulator_object<uint32_t>{c.emu, return_length.value()},
+                        [&](MEMORY_IMAGE_INFORMATION64& info) {
+                            info.ImageBase = mod->image_base;
+                            info.SizeOfImage = static_cast<int64_t>(mod->size_of_image);
+                            info.ImageFlags = 0;
+                        });
+                }
+
+                if (info_class == MemoryRegionInformation || info_class == MemoryRegionInformationEx)
+                {
+                    const auto parent_region = c.win_emu.parent()->memory.get_region_info(base_address);
+                    if (!parent_region.is_reserved)
+                    {
+                        return STATUS_INVALID_ADDRESS;
+                    }
+
+                    return handle_query<MEMORY_REGION_INFORMATION64>(
+                        c.emu, memory_information, static_cast<uint32_t>(memory_information_length),
+                        emulator_object<uint32_t>{c.emu, return_length.value()},
+                        [&](MEMORY_REGION_INFORMATION64& info) {
+                            memset(&info, 0, sizeof(info));
+                            info.AllocationBase = parent_region.allocation_base;
+                            info.AllocationProtect =
+                                map_emulator_to_nt_protection(parent_region.initial_permissions);
+                            info.RegionType =
+                                memory_region_policy::to_memory_region_information_type(parent_region.kind);
+                            info.RegionSize = static_cast<int64_t>(parent_region.allocation_length);
+                            info.CommitSize = static_cast<int64_t>(parent_region.length);
+                        });
+                }
+
                 if (info_class != MemoryBasicInformation)
                 {
                     return STATUS_NOT_SUPPORTED;
                 }
 
                 const auto region = c.win_emu.parent()->memory.get_region_info(base_address);
+
+                c.win_emu.log.print(color::green, "[PARENTQUERY] 0x%" PRIx64 " -> base=0x%" PRIx64 " len=0x%" PRIx64 " kind=%u committed=%d\n",
+                                    base_address, region.start, static_cast<uint64_t>(region.length),
+                                    static_cast<unsigned>(region.kind), region.is_committed ? 1 : 0);
+
                 return handle_query<MEMORY_BASIC_INFORMATION64>(
                     c.emu, memory_information, static_cast<uint32_t>(memory_information_length),
                     emulator_object<uint32_t>{c.emu, return_length.value()}, [&](MEMORY_BASIC_INFORMATION64& info) {
                         info.BaseAddress = region.start;
                         info.AllocationBase = region.allocation_base;
-                        info.AllocationProtect = 0;
+                        info.AllocationProtect = map_emulator_to_nt_protection(region.initial_permissions);
                         info.RegionSize = region.length;
                         info.State = region.is_committed ? MEM_COMMIT : (region.is_reserved ? MEM_RESERVE : MEM_FREE);
                         info.Protect = map_emulator_to_nt_protection(region.permissions);
-                        info.Type = MEM_PRIVATE;
+
+                        // A dumper decides what to write out from Type: reporting everything as
+                        // private hides which regions are the mapped images it is after.
+                        switch (region.kind)
+                        {
+                        case memory_region_kind::section_image:
+                            info.Type = MEM_IMAGE;
+                            break;
+                        case memory_region_kind::file_section_view:
+                        case memory_region_kind::pagefile_section_view:
+                            info.Type = MEM_MAPPED;
+                            break;
+                        default:
+                            info.Type = MEM_PRIVATE;
+                            break;
+                        }
                     });
             }
 
@@ -234,25 +313,31 @@ namespace sogen
 
             if (info_class == MemoryImageExtensionInformation)
             {
-                constexpr uint64_t struct_size = 24;
-                if (return_length)
-                {
-                    return_length.write(struct_size);
-                }
-                if (memory_information_length < struct_size)
-                {
-                    return STATUS_BUFFER_TOO_SMALL;
-                }
-
-                const auto* mod = base_address == 0 ? c.win_emu.mod_manager.executable
-                                                    : c.win_emu.mod_manager.find_by_address(base_address);
+                // MEMORY_IMAGE_EXTENSION_INFORMATION: USHORT ExtensionImageBaseRva, USHORT
+                // ExtensionImageSize, ULONG Flags, ULONG Reserved[4] -- 0x18 bytes, which is
+                // the size callers ask for. Images built without a hotpatch extension have
+                // none, so an all-zero answer is the correct one rather than a failure.
+                const auto* mod = c.win_emu.mod_manager.find_by_address(base_address);
                 if (!mod)
                 {
                     return STATUS_INVALID_ADDRESS;
                 }
 
-                const std::array<uint8_t, 24> empty{};
+                constexpr uint32_t extension_info_size = 0x18;
+
+                if (return_length)
+                {
+                    return_length.write(extension_info_size);
+                }
+
+                if (memory_information_length < extension_info_size)
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                const std::array<uint8_t, extension_info_size> empty{};
                 c.emu.write_memory(memory_information, empty.data(), empty.size());
+
                 return STATUS_SUCCESS;
             }
 
@@ -310,7 +395,7 @@ namespace sogen
 
             if (info_class == MemoryMappedFilenameInformation)
             {
-                const auto mapped_filename = get_mapped_filename(c, base_address);
+                const auto mapped_filename = get_mapped_filename(c.win_emu, base_address);
                 if (!mapped_filename)
                 {
                     return STATUS_INVALID_ADDRESS;
@@ -759,6 +844,18 @@ namespace sogen
         {
             number_of_bytes_read.try_write(0);
 
+            // SOGEN_QVM_DEBUG=1 -- the child's dumper opens the parent successfully
+            // ([OPENPROC] -> REMOTE_PARENT_PROCESS_HANDLE) yet [PARENTREAD] never fires, so
+            // the reads arrive under some other handle. Log which.
+            if (getenv("SOGEN_QVM_DEBUG"))
+            {
+                c.win_emu.log.print(color::cyan,
+                                    "[RVM] h=0x%" PRIx64 " parent=0x%" PRIx64 " cur=%d addr=0x%" PRIx64 " len=%u\n",
+                                    process_handle.bits, static_cast<uint64_t>(REMOTE_PARENT_PROCESS_HANDLE.bits),
+                                    c.proc.is_current_process_handle(process_handle) ? 1 : 0, base_address,
+                                    number_of_bytes_to_read);
+            }
+
             // Theia's child is a dumper and its target is the parent process. Serve reads
             // through the parent handle from the parent emulator's address space, so the
             // dumper sees the real (decrypted) image rather than an empty stub.
@@ -766,15 +863,38 @@ namespace sogen
             {
                 auto& parent_memory = c.win_emu.parent()->memory;
 
+                // Copy page by page and stop at the first unreadable one, reporting how much
+                // was transferred. A dumper reads large spans that routinely straddle an
+                // unmapped page; failing the whole request loses the readable part, which is
+                // not what Windows does and not what the caller can recover from.
+                constexpr size_t page_size = 0x1000;
                 std::vector<uint8_t> data(number_of_bytes_to_read);
-                if (!parent_memory.try_read_memory(base_address, data.data(), data.size()))
+
+                size_t copied = 0;
+                while (copied < data.size())
                 {
-                    return STATUS_PARTIAL_COPY;
+                    const auto address = base_address + copied;
+                    const auto page_remainder = page_size - (address % page_size);
+                    const auto chunk = std::min<size_t>(page_remainder, data.size() - copied);
+
+                    if (!parent_memory.try_read_memory(address, data.data() + copied, chunk))
+                    {
+                        break;
+                    }
+
+                    copied += chunk;
                 }
 
-                c.emu.write_memory(buffer, data.data(), data.size());
-                number_of_bytes_read.try_write(number_of_bytes_to_read);
-                return STATUS_SUCCESS;
+                if (copied)
+                {
+                    c.emu.write_memory(buffer, data.data(), copied);
+                }
+
+                c.win_emu.log.print(color::green, "[PARENTREAD] 0x%" PRIx64 " len=%u -> %zu bytes\n", base_address,
+                                    number_of_bytes_to_read, copied);
+
+                number_of_bytes_read.try_write(static_cast<ULONG>(copied));
+                return copied == data.size() ? STATUS_SUCCESS : STATUS_PARTIAL_COPY;
             }
 
             if (!c.proc.is_current_process_handle(process_handle))

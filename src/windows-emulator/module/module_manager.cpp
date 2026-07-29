@@ -293,7 +293,7 @@ namespace sogen
     void module_manager::load_native_64bit_modules(const windows_path& executable_path, const windows_path& ntdll_path,
                                                    const windows_path& win32u_path, const logger& logger)
     {
-        this->executable = this->map_module_or_throw(executable_path, logger, true);
+        this->executable = this->map_module_or_throw(executable_path, logger, true, false, this->executable_base_hint);
         this->memory_->set_dep_enabled(this->executable->machine != static_cast<uint16_t>(PEMachineType::I386) ||
                                        (this->executable->dll_characteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT) != 0);
 
@@ -506,9 +506,9 @@ namespace sogen
     }
 
     mapped_module* module_manager::map_module_or_throw(const windows_path& file, const logger& logger, const bool is_static,
-                                                       bool allow_duplicate)
+                                                       bool allow_duplicate, const uint64_t relocation_base)
     {
-        auto* mapped_module = this->map_module(file, logger, is_static, allow_duplicate);
+        auto* mapped_module = this->map_module(file, logger, is_static, allow_duplicate, relocation_base);
         if (mapped_module == nullptr)
         {
             throw std::runtime_error{"Cannot map " + file.string()};

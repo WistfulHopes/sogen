@@ -95,6 +95,11 @@ namespace sogen
 
         module_manager(memory_manager& memory, file_system& file_sys, callbacks& cb);
 
+        // Pins the executable's base for map_main_modules. Windows maps one image section at
+        // one base in every process and Theia relies on it, so a child running the same image
+        // as its parent must land where the parent's copy did. Zero keeps the preferred base.
+        uint64_t executable_base_hint{};
+
         void map_main_modules(const windows_path& executable_path, windows_version_manager& version, process_context& context,
                               const logger& logger);
 
@@ -102,7 +107,7 @@ namespace sogen
         mapped_module* map_module(windows_path file, const logger& logger, bool is_static = false, bool allow_duplicate = false,
                                   uint64_t relocation_base = 0);
         mapped_module* map_module_or_throw(const windows_path& file, const logger& logger, bool is_static = false,
-                                           bool allow_duplicate = false);
+                                           bool allow_duplicate = false, uint64_t relocation_base = 0);
         mapped_module* map_local_module(const std::filesystem::path& file, windows_path module_path, const logger& logger,
                                         bool is_static = false, bool allow_duplicate = false, uint64_t relocation_base = 0);
         mapped_module* map_memory_module(uint64_t base_address, uint64_t image_size, windows_path module_path, const logger& logger,

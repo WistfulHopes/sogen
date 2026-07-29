@@ -13,6 +13,14 @@ namespace sogen
                                                   const uint64_t process_information, const uint32_t process_information_length,
                                                   const emulator_object<uint32_t> return_length)
         {
+            if (getenv("SOGEN_QVM_DEBUG"))
+            {
+                c.win_emu.log.print(color::cyan, "[QIP] h=0x%" PRIx64 " cur=%d parent=%d class=%u len=%u\n", process_handle.bits,
+                                    c.proc.is_current_process_handle(process_handle) ? 1 : 0,
+                                    process_handle == REMOTE_PARENT_PROCESS_HANDLE ? 1 : 0,
+                                    static_cast<unsigned>(info_class), static_cast<unsigned>(process_information_length));
+            }
+
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 // A dumper reads its target's PEB to locate the image base, so the parent handle
@@ -232,6 +240,7 @@ namespace sogen
                         c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
                     basic_info.AffinityMask = processor_count >= 64 ? ~0ull : ((1ull << processor_count) - 1);
                     basic_info.UniqueProcessId = process_context::process_id;
+                    basic_info.InheritedFromUniqueProcessId = c.proc.parent_process_id;
                 };
 
                 switch (process_information_length)
@@ -597,6 +606,16 @@ namespace sogen
 
             const auto id = client_id.read();
 
+            // A child opening its parent's pid gets the parent. Checked before the self case:
+            // every emulated process currently shares process_context::process_id, so from a
+            // child the two are indistinguishable by pid alone and the parent is what was asked
+            // for.
+            if (c.win_emu.parent() && id.UniqueProcess == c.proc.parent_process_id && c.proc.parent_process_id != 0)
+            {
+                process_handle.write(REMOTE_PARENT_PROCESS_HANDLE);
+                return STATUS_SUCCESS;
+            }
+
             // The guest opening its own pid resolves to the real guest process handle.
             if (id.UniqueProcess == process_context::process_id)
             {
@@ -672,6 +691,32 @@ namespace sogen
                                     static_cast<uint32_t>(exit_status));
                 c.proc.exit_status = exit_status;
                 c.win_emu.stop();
+                return STATUS_SUCCESS;
+            }
+
+            // Cross-process termination. Theia's child terminates the parent (and the parent the
+            // child) when it gives up, and returning NOT_SUPPORTED leaves the emulated pair
+            // unable to tear each other down: the child parks on its error dialog forever and
+            // the parent keeps waiting on a process that can never exit.
+            if (process_handle == REMOTE_PARENT_PROCESS_HANDLE && c.win_emu.parent())
+            {
+                auto& parent = *c.win_emu.parent();
+                c.win_emu.log.print(color::red, "[EXITPROC] child terminating PARENT, exit_status=0x%X\n",
+                                    static_cast<uint32_t>(exit_status));
+                parent.process.exit_status = exit_status;
+                parent.stop();
+                return STATUS_SUCCESS;
+            }
+
+            if (process_handle == PACKER_CHILD_PROCESS_HANDLE)
+            {
+                c.win_emu.log.print(color::red, "[EXITPROC] parent terminating CHILD, exit_status=0x%X\n",
+                                    static_cast<uint32_t>(exit_status));
+                for (auto& child : c.win_emu.children())
+                {
+                    child->process.exit_status = exit_status;
+                    child->stop();
+                }
                 return STATUS_SUCCESS;
             }
 

@@ -103,6 +103,12 @@ namespace sogen
             return !file.bad();
         }
 
+        // A hive cell tops out at 16344 bytes, so larger values are split into segments and
+        // referenced through a "db" record: a segment count plus the offset of a list of
+        // segment offsets. Without this a caller reads the 16-byte db cell as if it were the
+        // value, which yields garbage.
+        constexpr size_t MAX_CELL_DATA = 16344;
+
         void read_file_data(std::ifstream& file, const uint64_t offset, void* buffer, const size_t size)
         {
             if (!read_file_data_safe(file, offset, buffer, size))
@@ -117,6 +123,49 @@ namespace sogen
             result.resize(size);
 
             read_file_data(file, offset, result.data(), size);
+            return result;
+        }
+
+        std::vector<std::byte> read_big_data_or_direct(std::ifstream& file, const uint32_t data_offset, const size_t data_length)
+        {
+            if (data_length <= MAX_CELL_DATA)
+            {
+                return read_file_data(file, MAIN_ROOT_OFFSET + data_offset, data_length);
+            }
+
+#pragma pack(push, 1)
+            struct big_data_block
+            {
+                uint16_t signature;
+                uint16_t segment_count;
+                uint32_t segment_list_offset;
+            };
+#pragma pack(pop)
+
+            big_data_block db{};
+            read_file_data(file, MAIN_ROOT_OFFSET + data_offset, &db, sizeof(db));
+
+            constexpr uint16_t big_data_signature = 0x6264; // 'db'
+            if (db.signature != big_data_signature || db.segment_count == 0)
+            {
+                return read_file_data(file, MAIN_ROOT_OFFSET + data_offset, data_length);
+            }
+
+            std::vector<std::byte> result{};
+            result.reserve(data_length);
+
+            for (uint16_t i = 0; i < db.segment_count && result.size() < data_length; ++i)
+            {
+                uint32_t segment_offset = 0;
+                read_file_data(file, MAIN_ROOT_OFFSET + db.segment_list_offset + 4 + (i * sizeof(uint32_t)), &segment_offset,
+                               sizeof(segment_offset));
+
+                const auto remaining = data_length - result.size();
+                const auto chunk = read_file_data(file, MAIN_ROOT_OFFSET + segment_offset + 4, std::min(MAX_CELL_DATA, remaining));
+                result.insert(result.end(), chunk.begin(), chunk.end());
+            }
+
+            result.resize(data_length);
             return result;
         }
 
@@ -172,7 +221,7 @@ namespace sogen
 
         if (!value.parsed)
         {
-            value.data = read_file_data(file, MAIN_ROOT_OFFSET + value.data_offset, value.data_length);
+            value.data = read_big_data_or_direct(file, value.data_offset, value.data_length);
             value.parsed = true;
         }
 
@@ -251,7 +300,10 @@ namespace sogen
             raw_value.parsed = false;
             raw_value.type = value.value_type;
             raw_value.name = value_name;
-            raw_value.data_length = value.size & 0xffff;
+            // Bit 31 is the "data stored inline" flag; the size is the remaining 31 bits.
+            // Masking to 16 bits truncated anything over 64 KB -- ProductPolicy (72,420 bytes)
+            // became 6,884, which is what made NtQueryLicenseValue fail.
+            raw_value.data_length = value.size & 0x7fffffff;
             raw_value.data_offset = value.offset + 4;
 
             if (value.size & 1 << 31)

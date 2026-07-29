@@ -811,6 +811,7 @@ namespace sogen
 
         child->is_child_ = true;
         child->parent_ = this;
+        child->process.parent_process_id = process_context::process_id;
 
         auto* child_ptr = this->children_.emplace_back(std::move(child)).get();
 
@@ -994,6 +995,7 @@ namespace sogen
 
         this->version.load_from_registry(this->registry, this->log);
 
+        this->mod_manager.executable_base_hint = this->application_settings_.image_base;
         this->mod_manager.map_main_modules(this->application_settings_.application, this->version, context, this->log);
         this->install_section_first_execution_hooks();
 
@@ -1278,9 +1280,185 @@ namespace sogen
     void windows_emulator::setup_hooks()
     {
         this->callbacks.on_module_load.add([this](mapped_module& mod) {
+            if (getenv("SOGEN_MODLOAD"))
+            {
+                this->log.print(color::pink, "[MODLOAD] '%s'\n", mod.name.c_str());
+            }
+
+            // SOGEN_LDRNAME=1 -- Theia's dumper calls GetModuleHandleW/LdrGetDllHandle and then
+            // goes straight to formatting its failure message, so whatever module it fails to
+            // find is what the dump needs. LdrGetDllHandle's third argument (r8) is the
+            // PUNICODE_STRING name; log it rather than guessing at dbghelp/dbgcore.
+            // Key on the module being loaded, not mod_manager.ntdll: that pointer is assigned
+            // AFTER map_module_or_throw returns, so it is still null while ntdll's own
+            // on_module_load runs. Using `mod` directly works in both emulators regardless of
+            // the order map_main_modules happens to use.
+            if (mod.name == "ntdll.dll" && getenv("SOGEN_LDRNAME"))
+            {
+                // find_export() returns 0 here: exports are not parsed yet when on_module_load
+                // fires for a module. The RVA is stable and the trace already names the
+                // address, so derive it from the image base instead.
+                constexpr uint64_t ldr_get_dll_handle_rva = 0x15520;
+                if (const auto addr = mod.image_base + ldr_get_dll_handle_rva)
+                {
+                    this->emu().hook_memory_execution(addr, [this](cpu_interface&, const uint64_t) {
+                        const auto us = this->emu().reg<uint64_t>(x86_register::r8);
+                        uint16_t len = 0;
+                        uint64_t buf = 0;
+                        if (!this->memory.try_read_memory(us, &len, sizeof(len)) ||
+                            !this->memory.try_read_memory(us + 8, &buf, sizeof(buf)) || !len || len > 512)
+                        {
+                            return;
+                        }
+                        std::u16string name(len / 2, u'\0');
+                        if (this->memory.try_read_memory(buf, name.data(), len))
+                        {
+                            this->log.print(color::pink, "[LDRNAME] LdrGetDllHandle('%s')\n", u16_to_u8(name).c_str());
+                        }
+                    });
+                    this->log.info("[LDRNAME] armed at 0x%" PRIx64 "\n", addr);
+                }
+
+                // Control for the hook mechanism itself. Three separate armings have now
+                // "never fired", and each was explained away as guest behaviour. Hook an
+                // address the trace shows executing repeatedly: if this stays silent, the
+                // mechanism is broken and every such conclusion drawn from it is worthless.
+                if (const auto* nt_mod = this->mod_manager.ntdll)
+                {
+                    const auto probe = nt_mod->image_base + 0x161f62; // NtQueryVirtualMemory stub
+                    this->emu().hook_memory_execution(probe, [this](cpu_interface&, const uint64_t) {
+                        static long fired = 0;
+                        if (++fired <= 3)
+                        {
+                            this->log.print(color::pink, "[HOOKTEST] fired #%ld\n", fired);
+                        }
+                    });
+                    this->log.info("[HOOKTEST] armed at 0x%" PRIx64 "\n", probe);
+                }
+            }
+
             for (size_t i = 0; i < mod.sections.size(); ++i)
             {
                 this->install_section_first_execution_hook(mod, i);
+            }
+
+            // ---- Theia container/page key capture ------------------------------------
+            // The page cipher is fully solved offline (tools/dumper/theia_blake3.h): it is
+            // BLAKE3 compress, 7 rounds, zero message block, keyed by a 33-byte struct
+            // (32-byte cv + block_len at +32, flags = that byte ^ 0x1B). What is NOT known
+            // is how that cv is derived -- it changes per 4 KB page, and ~1.3G candidates
+            // at align 1 proved it is stored in no shipped file and no memory snapshot.
+            //
+            // Scanning for it is therefore hopeless, but reading it is trivial: exactly TWO
+            // instructions in the whole 61 MB of runtime.dll call the cipher, and rcx holds
+            // the key struct at both. Hooking them here is undetectable in a way no native
+            // technique is -- Theia's dispatched block opens with `pushfq` so a trap flag is
+            // visible to it, and int3 patches its own code. An emulator execution hook
+            // exists entirely outside the guest.
+            //
+            // Init decrypts pages just to run (the game exe's .text ships as ciphertext), so
+            // this fires long before any pak is opened -- it does not need the game to boot.
+            if (mod.name == "runtime.dll")
+            {
+                struct site
+                {
+                    uint64_t rva;
+                    const char* what;
+                };
+                static constexpr site sites[] = {
+                    {0x1559246, "container (sub_201559147)"},
+                    {0x159585D, "page fault (sub_20159552B)"},
+                    // Control: the tripwire, which the #DB trace proves executes in both
+                    // processes. If this fires and the two cipher sites do not, they are
+                    // genuinely unreached rather than unhooked.
+                    {0x898384, "CONTROL tripwire (known to execute)"},
+                };
+
+                // SOGEN_C0210_BP=1 -- every site in runtime.dll that loads the immediate
+                // 0xC0000210, the "Internal error #4" the dumper dies with. No syscall
+                // returns that status, so it is Theia's own check; several of these are
+                // preceded by `mov eax,[rbx]; and eax,3`, a state word masked to two bits.
+                // Whichever fires names the failing check and rbx is the state object.
+                if (getenv("SOGEN_C0210_BP"))
+                {
+                    static constexpr uint64_t c0210_sites[] = {
+                        0x8CFD05, 0x8CFD22, 0x8D09F6, 0x8D0AC1, 0x8D0BB4, 0x8D0C77, 0x8D102D, 0x8D10C8,
+                        0x8F2E24, 0x8F2E40, 0x8F3AE2, 0x8F3BA7, 0x8F3C90, 0x8F3D4F, 0x8F40FE, 0x8F4198,
+                    };
+
+                    for (const auto rva : c0210_sites)
+                    {
+                        this->emu().hook_memory_execution(
+                            mod.image_base + rva, [this, rva](cpu_interface&, const uint64_t) {
+                                const auto rbx = this->emu().reg<uint64_t>(x86_register::rbx);
+                                uint32_t state = 0;
+                                const bool ok = this->memory.try_read_memory(rbx, &state, sizeof(state));
+                                this->log.print(color::pink,
+                                                "[C0210] site +0x%" PRIx64 " rbx=0x%" PRIx64
+                                                " [rbx]=%s0x%x (and 3 -> %u)\n",
+                                                rva, rbx, ok ? "" : "<unreadable>", ok ? state : 0,
+                                                ok ? (state & 3) : 0);
+                            });
+                    }
+                    this->log.info("[C0210] armed %zu sites\n", std::size(c0210_sites));
+                }
+
+                // SOGEN_TF_DEBUG=1 -- Theia's flattened blocks bracket themselves with
+                // pushfq/popfq, so a TF left set in guest RFLAGS at the pushfq is restored
+                // by the matching popfq much later and traps at an unrelated site. Log the
+                // flag where it is captured and where it is restored.
+                if (getenv("SOGEN_TF_DEBUG"))
+                {
+                    static constexpr site tf_sites[] = {
+                        {0x15AAC00, "pushfq (save)"},
+                        {0x15579AB, "popfq (restore)"},
+                    };
+
+                    for (const auto& t : tf_sites)
+                    {
+                        const auto* what = t.what;
+                        this->emu().hook_memory_execution(
+                            mod.image_base + t.rva, [this, what](cpu_interface&, const uint64_t) {
+                                const auto fl = this->emu().reg<uint64_t>(x86_register::rflags);
+                                this->log.info("[TF] %-16s rflags=0x%" PRIx64 " TF=%d\n", what, fl,
+                                               (fl & 0x100) ? 1 : 0);
+                            });
+                    }
+                }
+
+                for (const auto& s : sites)
+                {
+                    const auto addr = mod.image_base + s.rva;
+                    const auto* what = s.what;
+                    this->emu().hook_memory_execution(addr, [this, addr, what](cpu_interface& cpu,
+                                                                               const uint64_t) {
+                        const auto key_ptr = this->emu().reg(x86_register::rcx);
+
+                        std::array<uint8_t, 33> key{};
+                        if (!this->memory.try_read_memory(key_ptr, key.data(), key.size()))
+                        {
+                            this->log.error("[THEIAKEY] %s: rcx=0x%" PRIx64 " unreadable\n", what, key_ptr);
+                            return;
+                        }
+
+                        std::string hex;
+                        hex.reserve(key.size() * 2);
+                        for (const auto b : key)
+                        {
+                            char tmp[3];
+                            (void)snprintf(tmp, sizeof(tmp), "%02x", b);
+                            hex += tmp;
+                        }
+
+                        const auto dst = this->emu().reg(x86_register::rdx);
+                        const auto src = this->emu().reg(x86_register::r8);
+                        this->log.info("[THEIAKEY] %s cv+k=%s dst=0x%" PRIx64 " src=0x%" PRIx64 "\n", what,
+                                       hex.c_str(), dst, src);
+                        (void)cpu;
+                        (void)addr;
+                    });
+                    this->log.info("[THEIAKEY] armed %s at 0x%" PRIx64 "\n", s.what, addr);
+                }
             }
 
             // ---- Theia clean-DLL hook-sweep diagnostic -------------------------------
@@ -1438,6 +1616,45 @@ namespace sogen
                 {
                     vcpu.thread().pending_skip_single_step = false;
                     return;
+                }
+
+                if (getenv("SOGEN_TF_DEBUG"))
+                {
+                    this->log.info("[TF] #DB rip=0x%" PRIx64 " eflags=0x%x TF=%d\n",
+                                   acting.reg<uint64_t>(x86_register::rip), eflags,
+                                   (eflags & 0x100) ? 1 : 0);
+                }
+
+                // DIAGNOSTIC (SOGEN_SWALLOW_DB=N): Theia single-steps its own tripwire three
+                // times and handles those, then its flattened epilogue restores a saved RFLAGS
+                // whose TF is still set (popfq at +0x15579AB), producing a fourth #DB at an
+                // unrelated site that it reports as a fatal STATUS_SINGLE_STEP. Swallowing
+                // deliveries past the Nth establishes whether that stray trap is the last
+                // blocker; it is not a fix for the TF bookkeeping itself.
+                {
+                    static const bool swallow_stray = std::getenv("SOGEN_SWALLOW_DB") != nullptr;
+
+                    // Theia arms TF itself only to step its own tripwire, and those sites are
+                    // fixed. Anything else is the leaked flag restored by a flattened
+                    // epilogue's popfq, so key the filter on the address rather than a count:
+                    // a global counter also swallows the tripwire when a second thread runs it.
+                    const auto db_rip = acting.reg<uint64_t>(x86_register::rip);
+                    const auto* db_mod = this->mod_manager.find_by_address(db_rip);
+                    const auto db_rva = db_mod ? db_rip - db_mod->image_base : 0;
+                    const bool is_tripwire =
+                        db_mod && db_mod->name == "runtime.dll" &&
+                        (db_rva == 0x898384 || db_rva == 0x898389 || db_rva == 0x8DB897);
+
+                    if (swallow_stray && !is_tripwire)
+                    {
+                        if ((eflags & 0x100) != 0)
+                        {
+                            acting.reg(x86_register::eflags, eflags & ~0x100);
+                        }
+                        this->log.info("[TF] swallowed stray #DB at 0x%" PRIx64 " (%s+0x%" PRIx64 ")\n",
+                                       db_rip, db_mod ? db_mod->name.c_str() : "?", db_rva);
+                        return;
+                    }
                 }
 
                 if ((eflags & 0x100) != 0)

@@ -111,6 +111,11 @@ namespace sogen
         std::vector<std::u16string> arguments{};
         utils::unordered_insensitive_u16string_map<std::u16string> environment{};
 
+        // Pin the executable's base. Windows maps one image section at one base in every
+        // process; Theia's child depends on that, reading its own address space at the address
+        // the parent's copy occupies. Zero means "use the PE's preferred base".
+        uint64_t image_base{};
+
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->application);
@@ -317,6 +322,12 @@ namespace sogen
         bool run_children_slice(size_t instructions);
 
         bool has_live_children() const;
+
+        // Cross-process termination needs to reach the children directly.
+        std::vector<std::unique_ptr<windows_emulator>>& children()
+        {
+            return this->children_;
+        }
 
         // A child runs in bounded slices driven by its parent, so it yields differently.
         bool is_child() const

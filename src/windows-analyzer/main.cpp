@@ -603,6 +603,13 @@ namespace sogen
                 // unicorn (the WHP fallback) is single-vCPU only, and a child process here is
                 // a helper rather than a workload worth parallelising.
                 child_options.vcpu_count = 1;
+                // int3 execution hooks are a WHP capability; unicorn's base implementation
+                // throws on them, which killed the run at NtCreateUserProcess. The child is a
+                // helper process, so drop back to the portable mode rather than fail.
+                if (child_options.backend != backend_type::whp)
+                {
+                    child_options.whp_execution_hook_mode = "auto";
+                }
                 return create_configured_backend(child_options);
             };
 
