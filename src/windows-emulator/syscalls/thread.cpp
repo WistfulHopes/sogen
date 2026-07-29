@@ -724,6 +724,56 @@ namespace sogen
                     }
                 }
 
+                // The parent suspends a worker just before spawning the child and never resumes
+                // it. Its spin waits for the mailbox to reach 6 while the child only ever gets
+                // it to 2, so something has to make that transition -- the suspended worker is
+                // the only candidate. Force it runnable to test that.
+                static const bool resume_parent_threads = [] {
+                    const auto* enabled = std::getenv("SOGEN_RESUME_PARENT_THREADS");
+                    return enabled && enabled[0] == '1';
+                }();
+
+                if (resume_parent_threads && request_pending)
+                {
+                    for (auto& thread : c.proc.threads | std::views::values)
+                    {
+                        if (thread.suspended > 0 && !thread.is_terminated())
+                        {
+                            c.win_emu.log.print(color::pink, "[RESUME] parent tid %u suspended=%u -> 0\n", thread.id,
+                                                thread.suspended);
+                            thread.suspended = 0;
+                        }
+                    }
+                }
+
+                // The parent's cmpxchg waits for the mailbox to read 6 and nothing in our run
+                // ever puts it there. Poking that value in makes the exchange succeed, so the
+                // protocol can be driven forward one state at a time to see what it expects
+                // next. Diagnostic, not a fix.
+                static const uint32_t poke_value = [] {
+                    const auto* value = std::getenv("SOGEN_POKE_MAILBOX");
+                    return value ? static_cast<uint32_t>(strtoul(value, nullptr, 0)) : 0u;
+                }();
+
+                if (poke_value && request_pending)
+                {
+                    static bool poked = false;
+                    if (!poked)
+                    {
+                        poked = true;
+                        for (auto& [sec_handle, sec] : c.proc.sections)
+                        {
+                            if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                            {
+                                continue;
+                            }
+
+                            c.emu.write_memory<uint32_t>(sec.backing_address, poke_value);
+                            c.win_emu.log.print(color::pink, "[POKE] mailbox[0] <- 0x%X\n", poke_value);
+                        }
+                    }
+                }
+
                 static uint64_t parent_yields = 0;
                 if ((++parent_yields % (request_pending ? ratio : 1)) == 0)
                 {
