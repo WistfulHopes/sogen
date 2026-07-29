@@ -693,6 +693,11 @@ namespace sogen
 
             if (!potential_base)
             {
+                c.win_emu.log.print(color::red,
+                                    "[ALLOCFAIL] no free base for bytes=0x%" PRIx64 " align=0x%" PRIx64 " lo=0x%" PRIx64
+                                    " hi=0x%" PRIx64 "\n",
+                                    allocation_bytes, address_requirements.alignment, address_requirements.lowest_address,
+                                    address_requirements.highest_address);
                 return STATUS_MEMORY_NOT_ALLOCATED;
             }
 
@@ -714,9 +719,18 @@ namespace sogen
 
             c.win_emu.callbacks.on_memory_allocate(potential_base, allocation_bytes, *protection, false);
 
-            return c.win_emu.memory.allocate_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection, !commit)
-                       ? STATUS_SUCCESS
-                       : STATUS_MEMORY_NOT_ALLOCATED;
+            if (c.win_emu.memory.allocate_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection, !commit))
+            {
+                return STATUS_SUCCESS;
+            }
+
+            // Theia's dumper dies with a generic HRESULT_FROM_WIN32 rather than a status, so a
+            // failed allocation here is invisible in the error it reports. Log the request.
+            c.win_emu.log.print(color::red,
+                                "[ALLOCFAIL] base=0x%" PRIx64 " requested=0x%" PRIx64 " bytes=0x%" PRIx64
+                                " prot=0x%X type=0x%X\n",
+                                potential_base, requested_base, allocation_bytes, page_protection, allocation_type);
+            return STATUS_MEMORY_NOT_ALLOCATED;
         }
 
         NTSTATUS handle_NtAllocateVirtualMemory(const syscall_context& c, const handle process_handle,
