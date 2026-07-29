@@ -851,6 +851,141 @@ namespace sogen
                         }
                     }
                 }
+                static const bool cross_wake = [] {
+                    const auto* e = getenv("SOGEN_CROSS_WAKE");
+                    return e && e[0] == '1';
+                }();
+                static const uint64_t cross_wake_delay = [] {
+                    const auto* e = getenv("SOGEN_CROSS_WAKE_DELAY");
+                    return e ? std::max<uint64_t>(1, strtoull(e, nullptr, 10)) : 1000;
+                }();
+                if (cross_wake)
+                {
+                    static uint64_t wake_countdown = 0;
+                    if (++wake_countdown >= cross_wake_delay)
+                    {
+                        for (auto& thread : c.proc.threads | std::views::values)
+                        {
+                            if (&thread == c.vcpu.active_thread || thread.is_terminated())
+                            {
+                                continue;
+                            }
+                            if (thread.suspended == 0 && thread.await_objects.empty())
+                            {
+                                continue;
+                            }
+
+                            bool woke = false;
+                            if (thread.suspended > 0)
+                            {
+                                thread.suspended = 0;
+                                woke = true;
+                            }
+                            for (const auto& obj : thread.await_objects)
+                            {
+                                if (auto* ev = c.proc.events.get(obj.bits))
+                                {
+                                    ev->signaled = true;
+                                    woke = true;
+                                }
+                            }
+
+                            if (woke)
+                            {
+                                c.win_emu.log.print(color::green,
+                                                    "[XWAKE] woke parent responder tid %u (suspended->0, signaled %zu awaited)\n",
+                                                    thread.id, thread.await_objects.size());
+                            }
+                        }
+                        wake_countdown = 0;
+                    }
+                }
+            }
+
+            static const bool section_responder = [] {
+                const auto* e = getenv("SOGEN_SECTION_RESPONDER");
+                return e && e[0] == '1';
+            }();
+            if (section_responder && !c.win_emu.shared_section_backings.empty())
+            {
+                constexpr uint32_t kMaxResp = 0x1FF000; // data page .. end of a 2 MB section
+                for (auto& [sec_handle, sec] : c.proc.sections)
+                {
+                    if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                    {
+                        continue;
+                    }
+                    const auto base = sec.backing_address;
+
+                    uint32_t doorbell = 0;
+                    try
+                    {
+                        doorbell = c.emu.read_memory<uint32_t>(base);
+                    }
+                    catch (...)
+                    {
+                        continue;
+                    }
+
+                    // 0 = idle, 1 = already answered (awaiting the child's consume). Anything else is a fresh
+                    // ring: the child writes 6 for an operation, 2 for the init handshake (FINDINGS 9.53).
+                    if (doorbell == 0 || doorbell == 1)
+                    {
+                        continue;
+                    }
+
+                    uint32_t opcode = 0;
+                    uint64_t arg0 = 0;
+                    uint32_t arg1 = 0;
+                    try
+                    {
+                        opcode = c.emu.read_memory<uint32_t>(base + 0x40);
+                        arg0 = c.emu.read_memory<uint64_t>(base + 0x80);
+                        arg1 = c.emu.read_memory<uint32_t>(base + 0x88);
+                    }
+                    catch (...)
+                    {
+                        continue;
+                    }
+
+                    c.win_emu.log.print(color::green,
+                                        "[RESPONDER] section %u ring=0x%x opcode=%u arg0=0x%" PRIx64 " arg1=0x%x\n",
+                                        static_cast<unsigned>(sec_handle), doorbell, opcode, arg0, arg1);
+
+                    switch (opcode)
+                    {
+                    case 0: // NtReadVirtualMemory(-1, arg0, buf = section+0x1000, arg1) against the parent
+                    {
+                        const uint32_t len = std::min<uint32_t>(arg1, kMaxResp);
+                        std::vector<uint8_t> buf(len, 0);
+                        try
+                        {
+                            c.emu.read_memory(arg0, buf.data(), buf.size());
+                        }
+                        catch (...)
+                        {
+                        }
+                        try
+                        {
+                            c.emu.write_memory(base + 0x1000, buf.data(), buf.size());
+                        }
+                        catch (...)
+                        {
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                    }
+
+                    try
+                    {
+                        c.emu.write_memory(base, uint32_t{1});
+                    }
+                    catch (...)
+                    {
+                    }
+                }
             }
 
             // One-shot survey of the main image's page protections. Theia marks executable

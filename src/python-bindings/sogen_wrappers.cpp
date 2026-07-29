@@ -2,6 +2,9 @@
 
 #include <windows_emulator.hpp>
 
+#include <algorithm>
+#include <ranges>
+
 namespace sogen::py
 {
     // ----- hook_registry -----
@@ -207,6 +210,75 @@ namespace sogen::py
     bool sogen_windows_emulator::activate_thread(const uint32_t id) const
     {
         return this->emu->activate_thread(this->emu->vcpu(0), id);
+    }
+
+    size_t sogen_windows_emulator::freeze_other_threads() const
+    {
+        const auto* active = this->emu->vcpu(0).active_thread;
+        size_t frozen = 0;
+        for (auto& entry : this->emu->process.threads)
+        {
+            emulator_thread& thr = entry.second;
+            if (&thr == active || thr.is_terminated())
+            {
+                continue;
+            }
+            thr.suspended = 1;
+            ++frozen;
+        }
+        return frozen;
+    }
+
+    size_t sogen_windows_emulator::unfreeze_all_threads() const
+    {
+        size_t resumed = 0;
+        for (auto& entry : this->emu->process.threads)
+        {
+            emulator_thread& thr = entry.second;
+            if (thr.suspended > 0)
+            {
+                thr.suspended = 0;
+                ++resumed;
+            }
+        }
+        return resumed;
+    }
+
+    emulator_thread* sogen_windows_emulator::get_thread(const uint32_t tid) const
+    {
+        for (auto& entry : this->emu->process.threads)
+        {
+            if (entry.second.id == tid)
+            {
+                return &entry.second;
+            }
+        }
+        return nullptr;
+    }
+
+    bool sogen_windows_emulator::signal_event(const uint64_t handle_value) const
+    {
+        auto& proc = this->emu->process;
+        auto* entry = proc.events.get(handle_value);
+        if (!entry)
+        {
+            return false;
+        }
+
+        entry->signaled = true;
+
+        // The cooperative scheduler only re-evaluates readiness at context switches, so wake any
+        // thread currently blocked on this event now (mirrors handle_NtPulseEvent's wake loop).
+        const auto event_handle = make_handle(handle_value);
+        for (auto& thr : proc.threads | std::views::values)
+        {
+            if (std::ranges::find(thr.await_objects, event_handle) != thr.await_objects.end())
+            {
+                (void)thr.is_thread_ready(*this->emu);
+            }
+        }
+
+        return true;
     }
 
     memory_manager& sogen_windows_emulator::memory() const

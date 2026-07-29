@@ -234,7 +234,7 @@ namespace sogen
                 {
                     if (++c.mapping_violation.second > 5)
                     {
-                        throw std::runtime_error("Too many identical violations. Aborting...");
+                        // throw std::runtime_error("Too many identical violations. Aborting...");
                     }
                 }
                 else

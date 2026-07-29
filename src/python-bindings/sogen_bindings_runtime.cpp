@@ -98,6 +98,29 @@ namespace sogen::py
             .def_prop_ro("current_ip", [](const emulator_thread& self) { return self.current_ip; })
             .def_prop_ro("previous_ip", [](const emulator_thread& self) { return self.previous_ip; })
             .def_prop_ro("setup_done", [](const emulator_thread& self) { return self.setup_done; })
+            .def_prop_rw("suspended", [](const emulator_thread& self) { return self.suspended; },
+                         [](emulator_thread& self, uint32_t v) { self.suspended = v; })
+            .def_prop_ro("await_objects", [](const emulator_thread& self) {
+                std::vector<uint64_t> out;
+                out.reserve(self.await_objects.size());
+                for (const auto& h : self.await_objects)
+                {
+                    out.push_back(h.bits);
+                }
+                return out;
+            })
+            .def_prop_ro("await_key", [](const emulator_thread& self) { return self.await_key; })
+            .def_prop_ro("await_any", [](const emulator_thread& self) { return self.await_any; })
+            .def_prop_ro("waiting_for_alert", [](const emulator_thread& self) { return self.waiting_for_alert; })
+            .def_prop_ro("alerted", [](const emulator_thread& self) { return self.alerted; })
+            .def_prop_ro("apc_alertable", [](const emulator_thread& self) { return self.apc_alertable; })
+            .def_prop_ro("pending_apcs", [](const emulator_thread& self) { return self.pending_apcs.size(); })
+            .def_prop_ro("has_await_time", [](const emulator_thread& self) { return self.await_time.has_value(); })
+            .def_prop_ro("has_await_msg", [](const emulator_thread& self) { return self.await_msg_mask.has_value(); })
+            .def_prop_ro("has_await_io", [](const emulator_thread& self) { return self.await_io_completion.has_value(); })
+            .def_prop_ro("has_await_host_condition",
+                         [](const emulator_thread& self) { return static_cast<bool>(self.await_host_condition); })
+            .def_prop_ro("is_terminated", [](const emulator_thread& self) { return self.is_terminated(); })
             .def_prop_ro("exit_status", [](const emulator_thread& self) -> nb::object {
                 if (!self.exit_status.has_value())
                 {
@@ -159,6 +182,10 @@ namespace sogen::py
                  nb::call_guard<nb::gil_scoped_release>())
             .def("perform_thread_switch", &sogen_windows_emulator::perform_thread_switch, nb::call_guard<nb::gil_scoped_release>())
             .def("activate_thread", &sogen_windows_emulator::activate_thread)
+            .def("freeze_other_threads", &sogen_windows_emulator::freeze_other_threads)
+            .def("unfreeze_all_threads", &sogen_windows_emulator::unfreeze_all_threads)
+            .def("signal_event", &sogen_windows_emulator::signal_event, nb::arg("handle_value"))
+            .def("get_thread", &sogen_windows_emulator::get_thread, nb::arg("tid"), nb::rv_policy::reference_internal)
             .def_prop_ro("executed_instructions",
                          [](const sogen_windows_emulator& self) { return self.native().get_executed_instructions(); })
             .def_prop_ro("last_stop_reason",

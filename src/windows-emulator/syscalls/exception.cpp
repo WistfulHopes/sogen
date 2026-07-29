@@ -1,6 +1,11 @@
 #include "../std_include.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../exception_dispatch.hpp"
+#include "../cpu_context.hpp"
+
+#include <algorithm>
+#include <vector>
 
 namespace sogen
 {
@@ -44,18 +49,24 @@ namespace sogen
         }
 
         NTSTATUS handle_NtRaiseException(const syscall_context& c,
-                                         const emulator_object<EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>> /*exception_record*/,
-                                         const emulator_object<CONTEXT64> /*thread_context*/, const BOOLEAN handle_exception)
+                                         const emulator_object<EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>> exception_record,
+                                         const emulator_object<CONTEXT64> thread_context, const BOOLEAN /*first_chance*/)
         {
-            if (handle_exception)
+            c.write_status = false;
+
+            const auto record = exception_record.read();
+            const auto context = thread_context.read();
+            cpu_context::restore(c.emu, context);
+
+            std::vector<EmulatorTraits<Emu64>::ULONG_PTR> parameters{};
+            const auto count = std::min<DWORD>(record.NumberParameters, 15);
+            parameters.reserve(count);
+            for (DWORD i = 0; i < count; ++i)
             {
-                c.win_emu.log.error("Unhandled exceptions not supported yet!\n");
-                c.emu.stop();
-                return STATUS_NOT_SUPPORTED;
+                parameters.push_back(record.ExceptionInformation[i]);
             }
 
-            c.win_emu.callbacks.on_exception();
-            c.emu.stop();
+            dispatch_exception(c.win_emu, c.vcpu, record.ExceptionCode, parameters);
 
             return STATUS_SUCCESS;
         }

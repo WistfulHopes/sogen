@@ -253,6 +253,10 @@ namespace sogen::py
         void yield_thread(bool alertable = false) const;
         bool perform_thread_switch() const;
         bool activate_thread(uint32_t id) const;
+        size_t freeze_other_threads() const;
+        size_t unfreeze_all_threads() const;
+        bool signal_event(uint64_t handle_value) const;
+        emulator_thread* get_thread(uint32_t tid) const;
 
         sogen_process_context process();
 

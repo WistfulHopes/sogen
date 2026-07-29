@@ -203,8 +203,60 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            if (info_class == MemoryWorkingSetExInformation || info_class == MemoryImageExtensionInformation)
+            if (info_class == MemoryWorkingSetExInformation)
             {
+                constexpr uint64_t entry_size = 2 * sizeof(uint64_t); // VirtualAddress + VirtualAttributes
+                const auto count = std::min<uint64_t>(memory_information_length / entry_size, 0x40000);
+                for (uint64_t i = 0; i < count; ++i)
+                {
+                    const auto entry = memory_information + i * entry_size;
+
+                    uint64_t va = 0;
+                    try
+                    {
+                        va = c.emu.read_memory<uint64_t>(entry);
+                    }
+                    catch (...)
+                    {
+                        continue;
+                    }
+
+                    uint64_t attributes = 0;
+                    try
+                    {
+                        const auto region = c.win_emu.memory.get_region_info(va);
+                        if (region.is_committed)
+                        {
+                            const auto prot = static_cast<uint64_t>(map_emulator_to_nt_protection(region.permissions));
+                            attributes |= 1ull;                   // Valid (bit 0)
+                            attributes |= (prot & 0x7FFull) << 4; // Win32Protection (bits 4..14)
+                        }
+                    }
+                    catch (...)
+                    {
+                    }
+
+                    try
+                    {
+                        c.emu.write_memory(entry + sizeof(uint64_t), attributes);
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+
+                if (return_length)
+                {
+                    return_length.write(memory_information_length);
+                }
+                return STATUS_SUCCESS;
+            }
+
+            if (info_class == MemoryImageExtensionInformation)
+            {
+                c.win_emu.log.error("NtQueryVirtualMemory: MemoryImageExtensionInformation not implemented (base 0x%" PRIx64
+                                    ")\n",
+                                    base_address);
                 return STATUS_NOT_SUPPORTED;
             }
 
