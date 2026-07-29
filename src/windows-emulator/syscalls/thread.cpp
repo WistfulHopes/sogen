@@ -661,7 +661,7 @@ namespace sogen
                 bool request_pending = false;
                 for (auto& [sec_handle, sec] : c.proc.sections)
                 {
-                    if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                    if (!sec.backing_address || !c.win_emu.is_packer_section(sec_handle))
                     {
                         continue;
                     }
@@ -715,7 +715,7 @@ namespace sogen
                     {
                         for (auto& [sec_handle, sec] : c.proc.sections)
                         {
-                            if (sec.backing_address && c.win_emu.shared_section_backings.contains(sec_handle))
+                            if (sec.backing_address && c.win_emu.is_packer_section(sec_handle))
                             {
                                 c.win_emu.arm_section_watch(sec.backing_address,
                                                             static_cast<size_t>(page_align_up(sec.maximum_size)));
@@ -769,7 +769,7 @@ namespace sogen
                     static uint64_t pokes = 0;
                     for (auto& [sec_handle, sec] : c.proc.sections)
                     {
-                        if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                        if (!sec.backing_address || !c.win_emu.is_packer_section(sec_handle))
                         {
                             continue;
                         }
@@ -799,7 +799,7 @@ namespace sogen
                         std::array<uint8_t, 8> bytes{};
                         for (auto& [sec_handle, sec] : c.proc.sections)
                         {
-                            if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                            if (!sec.backing_address || !c.win_emu.is_packer_section(sec_handle))
                             {
                                 continue;
                             }
@@ -900,11 +900,11 @@ namespace sogen
                 static uint64_t yield_count = 0;
                 ++yield_count;
 
-                if (!c.win_emu.shared_section_backings.empty() && (yield_count <= 400 || (yield_count % 2000) == 0))
+                if (c.win_emu.packer_section_handle && (yield_count <= 400 || (yield_count % 2000) == 0))
                 {
                     for (auto& [sec_handle, sec] : c.proc.sections)
                     {
-                        if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                        if (!sec.backing_address || !c.win_emu.is_packer_section(sec_handle))
                         {
                             continue;
                         }

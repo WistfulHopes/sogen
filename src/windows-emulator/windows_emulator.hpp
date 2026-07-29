@@ -336,6 +336,18 @@ namespace sogen
         // host pointer has no meaning in one.
         std::map<uint32_t, std::shared_ptr<host_page_buffer>> shared_section_backings{};
 
+        // The section handle Theia names in the child's PACKER_SECTION environment variable.
+        // That variable IS the identification -- the packer tells us which section is the
+        // mailbox, so nothing has to guess from section attributes or from which child
+        // strategy happens to be active.
+        std::optional<handle> packer_section_handle{};
+
+        bool is_packer_section(const uint32_t section_index) const
+        {
+            return this->packer_section_handle &&
+                   decltype(process_context::sections)::index_of(*this->packer_section_handle) == section_index;
+        }
+
         // Armed watchpoints over shared-section views. See the violation hook: the view is made
         // inaccessible so the next touch faults, is reported, and is then restored.
         struct section_watch

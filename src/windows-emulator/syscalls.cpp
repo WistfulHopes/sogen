@@ -1113,6 +1113,50 @@ namespace sogen
                 return STATUS_INVALID_PARAMETER;
             }
 
+            // Theia tells the child which section is the mailbox via PACKER_SECTION. Its value
+            // is the raw little-endian handle with 0x100 added to every byte, so the block
+            // contains no NULs. Recording it here is what lets later code identify that
+            // section for certain, in either child strategy, instead of inferring it.
+            if (process_parameters)
+            {
+                const auto environment = process_parameters.read().Environment;
+                if (environment)
+                {
+                    std::u16string entry{};
+                    for (uint64_t offset = 0; offset < 0x8000; offset += sizeof(char16_t))
+                    {
+                        const auto character = c.emu.read_memory<char16_t>(environment + offset);
+                        if (character)
+                        {
+                            entry.push_back(character);
+                            continue;
+                        }
+
+                        if (entry.empty())
+                        {
+                            break;
+                        }
+
+                        constexpr std::u16string_view key = u"PACKER_SECTION=";
+                        if (entry.starts_with(key))
+                        {
+                            const auto encoded = std::u16string_view(entry).substr(key.size());
+
+                            uint64_t value = 0;
+                            for (size_t i = 0; i < encoded.size() && i < sizeof(value); ++i)
+                            {
+                                value |= static_cast<uint64_t>(static_cast<uint8_t>(encoded[i] - 0x100)) << (i * 8);
+                            }
+
+                            c.win_emu.packer_section_handle = make_handle(value);
+                            c.win_emu.log.print(color::green, "[PACKERSEC] PACKER_SECTION = 0x%" PRIx64 "\n", value);
+                        }
+
+                        entry.clear();
+                    }
+                }
+            }
+
             c.win_emu.callbacks.on_generic_access("Creating process", image_path);
 
             process_object proc{};
