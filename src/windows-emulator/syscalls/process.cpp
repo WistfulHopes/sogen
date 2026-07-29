@@ -694,6 +694,32 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            // Cross-process termination. Theia's child terminates the parent (and the parent the
+            // child) when it gives up, and returning NOT_SUPPORTED leaves the emulated pair
+            // unable to tear each other down: the child parks on its error dialog forever and
+            // the parent keeps waiting on a process that can never exit.
+            if (process_handle == REMOTE_PARENT_PROCESS_HANDLE && c.win_emu.parent())
+            {
+                auto& parent = *c.win_emu.parent();
+                c.win_emu.log.print(color::red, "[EXITPROC] child terminating PARENT, exit_status=0x%X\n",
+                                    static_cast<uint32_t>(exit_status));
+                parent.process.exit_status = exit_status;
+                parent.stop();
+                return STATUS_SUCCESS;
+            }
+
+            if (process_handle == PACKER_CHILD_PROCESS_HANDLE)
+            {
+                c.win_emu.log.print(color::red, "[EXITPROC] parent terminating CHILD, exit_status=0x%X\n",
+                                    static_cast<uint32_t>(exit_status));
+                for (auto& child : c.win_emu.children())
+                {
+                    child->process.exit_status = exit_status;
+                    child->stop();
+                }
+                return STATUS_SUCCESS;
+            }
+
             return STATUS_NOT_SUPPORTED;
         }
 

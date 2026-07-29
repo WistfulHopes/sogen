@@ -323,6 +323,12 @@ namespace sogen
 
         bool has_live_children() const;
 
+        // Cross-process termination needs to reach the children directly.
+        std::vector<std::unique_ptr<windows_emulator>>& children()
+        {
+            return this->children_;
+        }
+
         // A child runs in bounded slices driven by its parent, so it yields differently.
         bool is_child() const
         {
