@@ -811,6 +811,7 @@ namespace sogen
 
         child->is_child_ = true;
         child->parent_ = this;
+        child->process.parent_process_id = process_context::process_id;
 
         auto* child_ptr = this->children_.emplace_back(std::move(child)).get();
 

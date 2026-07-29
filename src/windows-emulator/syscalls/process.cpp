@@ -232,6 +232,7 @@ namespace sogen
                         c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
                     basic_info.AffinityMask = processor_count >= 64 ? ~0ull : ((1ull << processor_count) - 1);
                     basic_info.UniqueProcessId = process_context::process_id;
+                    basic_info.InheritedFromUniqueProcessId = c.proc.parent_process_id;
                 };
 
                 switch (process_information_length)
@@ -596,6 +597,16 @@ namespace sogen
             }
 
             const auto id = client_id.read();
+
+            // A child opening its parent's pid gets the parent. Checked before the self case:
+            // every emulated process currently shares process_context::process_id, so from a
+            // child the two are indistinguishable by pid alone and the parent is what was asked
+            // for.
+            if (c.win_emu.parent() && id.UniqueProcess == c.proc.parent_process_id && c.proc.parent_process_id != 0)
+            {
+                process_handle.write(REMOTE_PARENT_PROCESS_HANDLE);
+                return STATUS_SUCCESS;
+            }
 
             // The guest opening its own pid resolves to the real guest process handle.
             if (id.UniqueProcess == process_context::process_id)

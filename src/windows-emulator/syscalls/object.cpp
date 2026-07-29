@@ -768,6 +768,20 @@ namespace sogen
         NTSTATUS handle_NtWaitForSingleObject(const syscall_context& c, const handle h, const BOOLEAN alertable,
                                               const emulator_object<LARGE_INTEGER> timeout)
         {
+            // SOGEN_WAITPROBE=1 -- Theia issues a burst of waits from distinct call sites with
+            // deliberately bogus arguments (a 1 ms relative timeout passed as the handle, among
+            // others) and each returns a different status. That is syscall fingerprinting, not
+            // synchronisation: it is checking we answer exactly as Windows does. Log the
+            // arguments so the statuses can be diffed against a native reference.
+            if (getenv("SOGEN_WAITPROBE"))
+            {
+                int64_t to_value = 0;
+                const bool have_timeout = timeout && c.emu.try_read_memory(timeout.value(), &to_value, sizeof(to_value));
+                c.win_emu.log.print(color::cyan, "[WAITPROBE] h=0x%" PRIx64 " alertable=%u timeout=%s%lld\n", h.bits,
+                                    static_cast<unsigned>(alertable), have_timeout ? "" : "INFINITE:",
+                                    static_cast<long long>(to_value));
+            }
+
             const auto resolved_handle = resolve_wait_handle(c, h);
             const auto validation_status = validate_wait_handle(c, resolved_handle);
             if (!NT_SUCCESS(validation_status))
