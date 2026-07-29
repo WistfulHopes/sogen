@@ -1219,10 +1219,34 @@ namespace sogen
                     }
                 }
 
+                // The child's executable is runtime.dll, which the parent already has mapped.
+                // Windows would give both processes the same base for that image section, and
+                // Theia relies on it: its dumper reads its OWN address space at the address the
+                // parent's copy occupies. Without this the child maps at the PE's preferred
+                // 0x200000000 while the parent sits wherever it was relocated, and every such
+                // read lands on unmapped memory.
+                uint64_t child_image_base = 0;
+                {
+                    const auto child_file = std::filesystem::weakly_canonical(
+                        std::filesystem::absolute(c.win_emu.file_sys.translate(windows_path{child_path})));
+                    for (const auto& loaded : c.win_emu.mod_manager.modules() | std::views::values)
+                    {
+                        if (loaded.path == child_file)
+                        {
+                            child_image_base = loaded.image_base;
+                            break;
+                        }
+                    }
+                }
+
                 auto* child = c.win_emu.create_child_process(application_settings{
                     .application = child_path,
                     .environment = std::move(child_env),
+                    .image_base = child_image_base,
                 });
+
+                c.win_emu.log.print(color::pink, "[CHILDBASE] pinning child executable to 0x%" PRIx64 "\n",
+                                    child_image_base);
 
                 if (child)
                 {

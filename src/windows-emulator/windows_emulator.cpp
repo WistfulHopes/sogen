@@ -994,6 +994,7 @@ namespace sogen
 
         this->version.load_from_registry(this->registry, this->log);
 
+        this->mod_manager.executable_base_hint = this->application_settings_.image_base;
         this->mod_manager.map_main_modules(this->application_settings_.application, this->version, context, this->log);
         this->install_section_first_execution_hooks();
 
@@ -1560,6 +1561,38 @@ namespace sogen
                     this->log.info("[TF] #DB rip=0x%" PRIx64 " eflags=0x%x TF=%d\n",
                                    acting.reg<uint64_t>(x86_register::rip), eflags,
                                    (eflags & 0x100) ? 1 : 0);
+                }
+
+                // DIAGNOSTIC (SOGEN_SWALLOW_DB=N): Theia single-steps its own tripwire three
+                // times and handles those, then its flattened epilogue restores a saved RFLAGS
+                // whose TF is still set (popfq at +0x15579AB), producing a fourth #DB at an
+                // unrelated site that it reports as a fatal STATUS_SINGLE_STEP. Swallowing
+                // deliveries past the Nth establishes whether that stray trap is the last
+                // blocker; it is not a fix for the TF bookkeeping itself.
+                {
+                    static const bool swallow_stray = std::getenv("SOGEN_SWALLOW_DB") != nullptr;
+
+                    // Theia arms TF itself only to step its own tripwire, and those sites are
+                    // fixed. Anything else is the leaked flag restored by a flattened
+                    // epilogue's popfq, so key the filter on the address rather than a count:
+                    // a global counter also swallows the tripwire when a second thread runs it.
+                    const auto db_rip = acting.reg<uint64_t>(x86_register::rip);
+                    const auto* db_mod = this->mod_manager.find_by_address(db_rip);
+                    const auto db_rva = db_mod ? db_rip - db_mod->image_base : 0;
+                    const bool is_tripwire =
+                        db_mod && db_mod->name == "runtime.dll" &&
+                        (db_rva == 0x898384 || db_rva == 0x898389 || db_rva == 0x8DB897);
+
+                    if (swallow_stray && !is_tripwire)
+                    {
+                        if ((eflags & 0x100) != 0)
+                        {
+                            acting.reg(x86_register::eflags, eflags & ~0x100);
+                        }
+                        this->log.info("[TF] swallowed stray #DB at 0x%" PRIx64 " (%s+0x%" PRIx64 ")\n",
+                                       db_rip, db_mod ? db_mod->name.c_str() : "?", db_rva);
+                        return;
+                    }
                 }
 
                 if ((eflags & 0x100) != 0)

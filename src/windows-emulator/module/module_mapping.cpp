@@ -480,9 +480,36 @@ namespace sogen
         const auto has_dynamic_base = optional_header.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE;
         const auto is_relocatable = is_dll || has_dynamic_base;
 
+        // relocation_base means "map it here", not just "fix up relocations for here":
+        // try_map_module_at_current_base allocates at binary.image_base, so without this the
+        // caller's requested address is silently ignored whenever the preferred base happens
+        // to be free.
+        if (relocation_base)
+        {
+            binary.image_base = relocation_base;
+        }
+
+        const auto preferred_base = binary.image_base;
         if (!binary.image_base || !try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
                                                                   relocation_base ? relocation_base : binary.image_base))
         {
+            // Theia's child dumper reads the parent using addresses derived from its OWN
+            // module bases, which is valid on Windows because a given image gets one base per
+            // boot session. If the two emulators disagree the dumper reads unmapped memory, so
+            // report every relocation away from the preferred base.
+            if (getenv("SOGEN_BASE_DEBUG"))
+            {
+                const auto conflict = memory.get_region_info(preferred_base);
+                printf("[BASE] %s: preferred 0x%llx unavailable (size 0x%llx) -- occupied by "
+                       "start=0x%llx len=0x%llx kind=%u reserved=%d\n",
+                       binary.name.c_str(), static_cast<unsigned long long>(preferred_base),
+                       static_cast<unsigned long long>(binary.size_of_image),
+                       static_cast<unsigned long long>(conflict.start),
+                       static_cast<unsigned long long>(conflict.length),
+                       static_cast<unsigned>(conflict.kind), conflict.is_reserved ? 1 : 0);
+                fflush(stdout);
+            }
+
             if (!is_relocatable && relocation_base == 0)
             {
                 throw std::runtime_error("Memory range not allocatable");

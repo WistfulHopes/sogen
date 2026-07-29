@@ -844,6 +844,18 @@ namespace sogen
         {
             number_of_bytes_read.try_write(0);
 
+            // SOGEN_QVM_DEBUG=1 -- the child's dumper opens the parent successfully
+            // ([OPENPROC] -> REMOTE_PARENT_PROCESS_HANDLE) yet [PARENTREAD] never fires, so
+            // the reads arrive under some other handle. Log which.
+            if (getenv("SOGEN_QVM_DEBUG"))
+            {
+                c.win_emu.log.print(color::cyan,
+                                    "[RVM] h=0x%" PRIx64 " parent=0x%" PRIx64 " cur=%d addr=0x%" PRIx64 " len=%u\n",
+                                    process_handle.bits, static_cast<uint64_t>(REMOTE_PARENT_PROCESS_HANDLE.bits),
+                                    c.proc.is_current_process_handle(process_handle) ? 1 : 0, base_address,
+                                    number_of_bytes_to_read);
+            }
+
             // Theia's child is a dumper and its target is the parent process. Serve reads
             // through the parent handle from the parent emulator's address space, so the
             // dumper sees the real (decrypted) image rather than an empty stub.
