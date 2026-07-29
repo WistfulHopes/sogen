@@ -2154,6 +2154,19 @@ namespace sogen
                                        share_access, FILE_OPEN, open_options, 0, 0);
         }
 
+        // Theia opens \\Device and enumerates it looking for driver objects that betray a
+        // debugger or VM. Reporting an empty directory is both the truthful answer for our
+        // object namespace and the answer that reveals nothing; leaving the syscall
+        // unimplemented stopped the emulator outright.
+        NTSTATUS handle_NtQueryDirectoryObject(const syscall_context& /*c*/, const handle /*directory_handle*/, const uint64_t /*buffer*/,
+                                               const ULONG /*length*/, const BOOLEAN /*return_single_entry*/,
+                                               const BOOLEAN /*restart_scan*/, const emulator_object<ULONG> /*context*/,
+                                               const emulator_object<ULONG> return_length)
+        {
+            return_length.write_if_valid(0);
+            return STATUS_NO_MORE_ENTRIES;
+        }
+
         NTSTATUS handle_NtOpenDirectoryObject(const syscall_context& c, const emulator_object<handle> directory_handle,
                                               const ACCESS_MASK /*desired_access*/,
                                               const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes)
@@ -2185,7 +2198,13 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            return STATUS_NOT_SUPPORTED;
+            // Only four names were ever recognised; anything else got STATUS_NOT_SUPPORTED,
+            // which Theia treats as an audit failure and exits 0xC0000244. Most callers only
+            // probe that the directory exists, so name the request and hand back a directory
+            // handle rather than failing outright.
+            c.win_emu.log.print(color::green, "[OPENDIR] '%s' -> vouching\n", u16_to_u8(object_name).c_str());
+            directory_handle.write(BASE_NAMED_OBJECTS_DIRECTORY);
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtCreateDirectoryObject(const syscall_context& /*c*/, const emulator_object<handle> /*directory_handle*/,

@@ -110,6 +110,9 @@ namespace sogen
         NTSTATUS handle_NtOpenDirectoryObject(const syscall_context& c, emulator_object<handle> directory_handle,
                                               ACCESS_MASK /*desired_access*/,
                                               emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
+        NTSTATUS handle_NtQueryDirectoryObject(const syscall_context& c, handle directory_handle, uint64_t buffer, ULONG length,
+                                               BOOLEAN return_single_entry, BOOLEAN restart_scan,
+                                               emulator_object<ULONG> context, emulator_object<ULONG> return_length);
         NTSTATUS handle_NtCreateDirectoryObject(const syscall_context& /*c*/, emulator_object<handle> /*directory_handle*/,
                                                 ACCESS_MASK /*desired_access*/,
                                                 emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
@@ -1475,6 +1478,7 @@ namespace sogen
         add_handler(NtUnlockVirtualMemory);
         add_handler(NtFlushVirtualMemory);
         add_handler(NtOpenDirectoryObject);
+        add_handler(NtQueryDirectoryObject);
         add_handler(NtCreateDirectoryObject);
         add_handler(NtTraceEvent);
         add_handler(NtAllocateVirtualMemoryEx);
