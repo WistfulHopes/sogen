@@ -1311,6 +1311,35 @@ namespace sogen
                     {0x159585D, "page fault (sub_20159552B)"},
                 };
 
+                // SOGEN_C0210_BP=1 -- every site in runtime.dll that loads the immediate
+                // 0xC0000210, the "Internal error #4" the dumper dies with. No syscall
+                // returns that status, so it is Theia's own check; several of these are
+                // preceded by `mov eax,[rbx]; and eax,3`, a state word masked to two bits.
+                // Whichever fires names the failing check and rbx is the state object.
+                if (getenv("SOGEN_C0210_BP"))
+                {
+                    static constexpr uint64_t c0210_sites[] = {
+                        0x8CFD05, 0x8CFD22, 0x8D09F6, 0x8D0AC1, 0x8D0BB4, 0x8D0C77, 0x8D102D, 0x8D10C8,
+                        0x8F2E24, 0x8F2E40, 0x8F3AE2, 0x8F3BA7, 0x8F3C90, 0x8F3D4F, 0x8F40FE, 0x8F4198,
+                    };
+
+                    for (const auto rva : c0210_sites)
+                    {
+                        this->emu().hook_memory_execution(
+                            mod.image_base + rva, [this, rva](cpu_interface&, const uint64_t) {
+                                const auto rbx = this->emu().reg<uint64_t>(x86_register::rbx);
+                                uint32_t state = 0;
+                                const bool ok = this->memory.try_read_memory(rbx, &state, sizeof(state));
+                                this->log.print(color::pink,
+                                                "[C0210] site +0x%" PRIx64 " rbx=0x%" PRIx64
+                                                " [rbx]=%s0x%x (and 3 -> %u)\n",
+                                                rva, rbx, ok ? "" : "<unreadable>", ok ? state : 0,
+                                                ok ? (state & 3) : 0);
+                            });
+                    }
+                    this->log.info("[C0210] armed %zu sites\n", std::size(c0210_sites));
+                }
+
                 // SOGEN_TF_DEBUG=1 -- Theia's flattened blocks bracket themselves with
                 // pushfq/popfq, so a TF left set in guest RFLAGS at the pushfq is restored
                 // by the matching popfq much later and traps at an unrelated site. Log the
