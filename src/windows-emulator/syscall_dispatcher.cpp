@@ -143,7 +143,12 @@ namespace sogen
                 // own dialogs, and the ones that matter are not just STATUS_NOT_SUPPORTED
                 // (0xC00000BB) / STATUS_INVALID_CID (0xC000000B) -- a child failing to map
                 // its inherited section returns STATUS_INVALID_HANDLE (0xC0000008).
-                if ((ret & 0xFFFFFFFFull) >= 0xC0000000ull && ret <= 0xFFFFFFFFull)
+                // Only meaningful when rax actually holds this syscall's status. Handlers that
+                // clear write_status either do not return (NtContinue restores a whole CONTEXT,
+                // rax included) or set rax themselves, so reading it as a status invents
+                // failures: Theia's 0xFFF tripwire leaves STATUS_INVALID_SYSTEM_SERVICE in a
+                // context it later resumes, and NtContinue was reported as "returning" that.
+                if (c.write_status && (ret & 0xFFFFFFFFull) >= 0xC0000000ull && ret <= 0xFFFFFFFFull)
                 {
                     win_emu.log.print(color::red, "[FAILRET] %s (0x%X) returned 0x%" PRIx64 " at 0x%" PRIx64 "\n",
                                       entry->second.name.c_str(), syscall_id, ret, address);
