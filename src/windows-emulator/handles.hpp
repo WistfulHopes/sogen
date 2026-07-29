@@ -620,7 +620,7 @@ namespace sogen
     constexpr auto KNOWN_DLLS_DIRECTORY = make_pseudo_handle(0x1, handle_types::directory);
     constexpr auto BASE_NAMED_OBJECTS_DIRECTORY = make_pseudo_handle(0x2, handle_types::directory);
     constexpr auto RPC_CONTROL_DIRECTORY = make_pseudo_handle(0x3, handle_types::directory);
-    constexpr auto DEVICE_DIRECTORY = make_pseudo_handle(0x4, handle_types::directory);
+    constexpr auto DEVICE_DIRECTORY = make_pseudo_handle(0x5, handle_types::directory);
     constexpr auto KNOWN_DLLS32_DIRECTORY = make_pseudo_handle(0x4, handle_types::directory);
 
     constexpr auto KNOWN_DLLS_SYMLINK = make_pseudo_handle(0x1, handle_types::symlink);

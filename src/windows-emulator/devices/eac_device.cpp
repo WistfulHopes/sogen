@@ -67,9 +67,21 @@ namespace sogen
                     return reply({0x19, 0x04, 0x00, 0x00});
 
                 case IOCTL_EAC_UNK1: {
+                    // Theia rejects the documented reply here and exits 0xC0000244, so both
+                    // values are overridable to sweep them: SOGEN_EAC_UNK1_FIRST is the answer
+                    // to the first call, SOGEN_EAC_UNK1_REST every call after.
+                    static const uint8_t first_value = [] {
+                        const auto* value = std::getenv("SOGEN_EAC_UNK1_FIRST");
+                        return value ? static_cast<uint8_t>(strtoul(value, nullptr, 0)) : uint8_t{0x04};
+                    }();
+                    static const uint8_t rest_value = [] {
+                        const auto* value = std::getenv("SOGEN_EAC_UNK1_REST");
+                        return value ? static_cast<uint8_t>(strtoul(value, nullptr, 0)) : uint8_t{0x01};
+                    }();
+
                     const std::array<uint8_t, 4> data =
-                        this->first_unk1_call ? std::array<uint8_t, 4>{0x04, 0x00, 0x00, 0x00} //
-                                              : std::array<uint8_t, 4>{0x01, 0x00, 0x00, 0x00};
+                        this->first_unk1_call ? std::array<uint8_t, 4>{first_value, 0x00, 0x00, 0x00} //
+                                              : std::array<uint8_t, 4>{rest_value, 0x00, 0x00, 0x00};
                     win_emu.log.print(color::cyan, "[EAC] ioctl 0x226013 (%s) -> %02x 00 00 00\n",
                                       this->first_unk1_call ? "first" : "subsequent", data[0]);
                     this->first_unk1_call = false;
