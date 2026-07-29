@@ -1798,6 +1798,14 @@ namespace sogen
                 }
             }
 
+            if (attributes.RootDirectory || filename.find(u"EasyAntiCheat") != std::u16string::npos ||
+                filename.find(u"Device") != std::u16string::npos)
+            {
+                c.win_emu.log.print(color::green, "[OPENDBG] name='%s' root=0x%" PRIx64 " prefix='%s'\n", u16_to_u8(filename).c_str(),
+                                    static_cast<uint64_t>(attributes.RootDirectory),
+                                    u16_to_u8(std::u16string(object_directory_prefix(make_handle(attributes.RootDirectory)))).c_str());
+            }
+
             // Check for console device paths
             // Convert to uppercase for case-insensitive comparison
             std::u16string filename_upper = filename;
