@@ -19,6 +19,8 @@ namespace sogen
 
     namespace syscalls
     {
+        std::u16string_view object_directory_prefix(handle h);
+
         namespace
         {
             bool has_valid_filename_characters(const std::u16string_view path)
@@ -555,6 +557,12 @@ namespace sogen
             if (info_class == FileIdBothDirectoryInformation)
             {
                 return handle_file_enumeration<FILE_ID_BOTH_DIR_INFORMATION>(c, io_status_block, file_information, length, query_flags,
+                                                                             file_name, f);
+            }
+
+            if (info_class == FileIdFullDirectoryInformation)
+            {
+                return handle_file_enumeration<FILE_ID_FULL_DIR_INFORMATION>(c, io_status_block, file_information, length, query_flags,
                                                                              file_name, f);
             }
 
@@ -1328,6 +1336,22 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
+            // A directory handle carries no FILE*, so falling through to fread() below
+            // dereferences garbage and takes the whole emulator down with no diagnostic.
+            // Windows answers a read on a directory with STATUS_INVALID_DEVICE_REQUEST.
+            if (f->is_directory())
+            {
+                if (io_status_block)
+                {
+                    IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                    block.Status = STATUS_INVALID_DEVICE_REQUEST;
+                    block.Information = 0;
+                    io_status_block.write(block);
+                }
+
+                return STATUS_INVALID_DEVICE_REQUEST;
+            }
+
             if (byte_offset)
             {
                 const auto offset = byte_offset.read();
@@ -1763,6 +1787,17 @@ namespace sogen
             const auto attributes = object_attributes.read();
             auto filename = read_unicode_string(c.emu, attributes.ObjectName);
 
+            // Resolve an object-directory RootDirectory up front: every check below (device,
+            // named pipe, console) matches on the full path, so prefixing later would leave
+            // \Device\<name> opens looking like bare relative filenames.
+            if (attributes.RootDirectory)
+            {
+                if (const auto prefix = object_directory_prefix(make_handle(attributes.RootDirectory)); !prefix.empty())
+                {
+                    filename = std::u16string(prefix) + u"\\" + filename;
+                }
+            }
+
             // Check for console device paths
             // Convert to uppercase for case-insensitive comparison
             std::u16string filename_upper = filename;
@@ -1841,14 +1876,18 @@ namespace sogen
 
             if (attributes.RootDirectory)
             {
-                const auto* root = c.proc.files.get(attributes.RootDirectory);
-                if (!root)
+                // Object-directory roots were already folded into the name above.
+                if (object_directory_prefix(make_handle(attributes.RootDirectory)).empty())
                 {
-                    return STATUS_INVALID_HANDLE;
-                }
+                    const auto* root = c.proc.files.get(attributes.RootDirectory);
+                    if (!root)
+                    {
+                        return STATUS_INVALID_HANDLE;
+                    }
 
-                const auto has_separator = root->name.ends_with(u"\\") || root->name.ends_with(u"/");
-                f.name = root->name + (has_separator ? u"" : u"\\") + f.name;
+                    const auto has_separator = root->name.ends_with(u"\\") || root->name.ends_with(u"/");
+                    f.name = root->name + (has_separator ? u"" : u"\\") + f.name;
+                }
             }
 
             printer.cancel();
@@ -2132,6 +2171,129 @@ namespace sogen
                                        share_access, FILE_OPEN, open_options, 0, 0);
         }
 
+        // Theia opens \\Device and enumerates it looking for driver objects that betray a
+        // debugger or VM. Reporting an empty directory is both the truthful answer for our
+        // object namespace and the answer that reveals nothing; leaving the syscall
+        // unimplemented stopped the emulator outright.
+        // Object-manager directories are pseudo handles rather than file objects; this maps
+        // them back to the path they stand for so relative opens resolve.
+        std::u16string_view object_directory_prefix(const handle h)
+        {
+            if (h == KNOWN_DLLS_DIRECTORY)
+            {
+                return u"\\KnownDlls";
+            }
+            if (h == KNOWN_DLLS32_DIRECTORY)
+            {
+                return u"\\KnownDlls32";
+            }
+            if (h == BASE_NAMED_OBJECTS_DIRECTORY)
+            {
+                return u"\\Sessions\\1\\BaseNamedObjects";
+            }
+            if (h == RPC_CONTROL_DIRECTORY)
+            {
+                return u"\\RPC Control";
+            }
+            if (h == DEVICE_DIRECTORY)
+            {
+                return u"\\Device";
+            }
+            return {};
+        }
+
+        NTSTATUS handle_NtQueryDirectoryObject(const syscall_context& c, const handle /*directory_handle*/, const uint64_t buffer,
+                                               const ULONG length, const BOOLEAN return_single_entry, const BOOLEAN restart_scan,
+                                               const emulator_object<ULONG> context, const emulator_object<ULONG> return_length)
+        {
+            // Top-level names under \Device, taken from the device registry so the two cannot
+            // drift apart. Reporting an empty directory fails Theia's audit outright
+            // (0xC0000244) -- it expects to find devices, EasyAntiCheat_EOS among them.
+            static const auto device_names = [] {
+                std::vector<std::u16string> names{};
+                for (const auto& entry : get_device_registry() | std::views::keys)
+                {
+                    std::u16string name{entry.substr(0, entry.find(u'\\'))};
+                    if (std::ranges::find(names, name) == names.end())
+                    {
+                        names.push_back(std::move(name));
+                    }
+                }
+                return names;
+            }();
+
+            auto index = restart_scan ? 0u : context.try_read().value_or(0u);
+            if (index >= device_names.size())
+            {
+                return_length.write_if_valid(0);
+                return STATUS_NO_MORE_ENTRIES;
+            }
+
+            constexpr uint32_t entry_size = 4 * sizeof(uint64_t); // two UNICODE_STRINGs
+            static const std::u16string type_name = u"Device";
+
+            uint64_t entry_cursor = buffer;
+            uint64_t string_cursor = buffer + length;
+            uint32_t written = 0;
+
+            for (; index < device_names.size(); ++index)
+            {
+                const auto& name = device_names[index];
+                const auto name_bytes = static_cast<uint32_t>(name.size() * sizeof(char16_t));
+                const auto type_bytes = static_cast<uint32_t>(type_name.size() * sizeof(char16_t));
+
+                // Entries grow up from the start, their strings down from the end; stop once
+                // the two would meet, leaving room for the terminating null entry.
+                if (entry_cursor + (2 * entry_size) > string_cursor - (name_bytes + type_bytes + 2 * sizeof(char16_t)))
+                {
+                    break;
+                }
+
+                // Null-terminate: callers routinely treat Buffer as a C string even though
+                // Length is authoritative.
+                string_cursor -= name_bytes + sizeof(char16_t);
+                const auto name_address = string_cursor;
+                c.emu.write_memory(name_address, name.c_str(), name_bytes + sizeof(char16_t));
+
+                string_cursor -= type_bytes + sizeof(char16_t);
+                const auto type_address = string_cursor;
+                c.emu.write_memory(type_address, type_name.c_str(), type_bytes + sizeof(char16_t));
+
+                c.win_emu.log.print(color::green, "[QUERYDIR] [%u] '%s' (single=%d len=%u)\n", index, u16_to_u8(name).c_str(),
+                                    return_single_entry ? 1 : 0, length);
+
+                c.emu.write_memory<uint16_t>(entry_cursor + 0, static_cast<uint16_t>(name_bytes));
+                c.emu.write_memory<uint16_t>(entry_cursor + 2, static_cast<uint16_t>(name_bytes + sizeof(char16_t)));
+                c.emu.write_memory<uint64_t>(entry_cursor + 8, name_address);
+                c.emu.write_memory<uint16_t>(entry_cursor + 16, static_cast<uint16_t>(type_bytes));
+                c.emu.write_memory<uint16_t>(entry_cursor + 18, static_cast<uint16_t>(type_bytes + sizeof(char16_t)));
+                c.emu.write_memory<uint64_t>(entry_cursor + 24, type_address);
+
+                entry_cursor += entry_size;
+                ++written;
+
+                if (return_single_entry)
+                {
+                    ++index;
+                    break;
+                }
+            }
+
+            if (written == 0)
+            {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            // The caller stops at an entry whose Name.Buffer is null.
+            const std::array<uint64_t, 4> terminator{};
+            c.emu.write_memory(entry_cursor, terminator.data(), sizeof(terminator));
+
+            context.write_if_valid(index);
+            return_length.write_if_valid(static_cast<uint32_t>(entry_cursor + entry_size - buffer));
+
+            return index >= device_names.size() ? STATUS_NO_MORE_ENTRIES : STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtOpenDirectoryObject(const syscall_context& c, const emulator_object<handle> directory_handle,
                                               const ACCESS_MASK /*desired_access*/,
                                               const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes)
@@ -2163,7 +2325,19 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            return STATUS_NOT_SUPPORTED;
+            if (object_name == u"\\Device")
+            {
+                directory_handle.write(DEVICE_DIRECTORY);
+                return STATUS_SUCCESS;
+            }
+
+            // Only four names were ever recognised; anything else got STATUS_NOT_SUPPORTED,
+            // which Theia treats as an audit failure and exits 0xC0000244. Most callers only
+            // probe that the directory exists, so name the request and hand back a directory
+            // handle rather than failing outright.
+            c.win_emu.log.print(color::green, "[OPENDIR] '%s' -> vouching\n", u16_to_u8(object_name).c_str());
+            directory_handle.write(BASE_NAMED_OBJECTS_DIRECTORY);
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtCreateDirectoryObject(const syscall_context& /*c*/, const emulator_object<handle> /*directory_handle*/,

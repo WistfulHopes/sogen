@@ -110,6 +110,9 @@ namespace sogen
         NTSTATUS handle_NtOpenDirectoryObject(const syscall_context& c, emulator_object<handle> directory_handle,
                                               ACCESS_MASK /*desired_access*/,
                                               emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
+        NTSTATUS handle_NtQueryDirectoryObject(const syscall_context& c, handle directory_handle, uint64_t buffer, ULONG length,
+                                               BOOLEAN return_single_entry, BOOLEAN restart_scan,
+                                               emulator_object<ULONG> context, emulator_object<ULONG> return_length);
         NTSTATUS handle_NtCreateDirectoryObject(const syscall_context& /*c*/, emulator_object<handle> /*directory_handle*/,
                                                 ACCESS_MASK /*desired_access*/,
                                                 emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
@@ -1184,8 +1187,20 @@ namespace sogen
                         c.win_emu.share_section_with_child(index, *child);
                     }
 
-                    c.win_emu.log.print(color::green, "[CHILDPROC] ---- child emulator starting ----\n");
-                    c.win_emu.run_children_slice(CHILD_BOOT_INSTRUCTIONS);
+                    // Boot slice size decides who reaches the shared mailbox first. Real process
+                    // creation takes milliseconds, so on Windows the parent runs on well before
+                    // the child gets anywhere -- a large slice here inverts that race. Default 0
+                    // (parent-first); the child still boots from the parent's yields.
+                    static const size_t boot_slice = [] {
+                        const auto* value = std::getenv("SOGEN_CHILD_BOOT_SLICE");
+                        return value ? static_cast<size_t>(strtoull(value, nullptr, 0)) : size_t{0};
+                    }();
+
+                    c.win_emu.log.print(color::green, "[CHILDPROC] ---- child emulator starting (boot slice %zu) ----\n", boot_slice);
+                    if (boot_slice)
+                    {
+                        c.win_emu.run_children_slice(boot_slice);
+                    }
 
                     info.State = PsCreateSuccess;
                     info.SuccessState.UserProcessParametersNative = process_parameters.value();
@@ -1463,6 +1478,7 @@ namespace sogen
         add_handler(NtUnlockVirtualMemory);
         add_handler(NtFlushVirtualMemory);
         add_handler(NtOpenDirectoryObject);
+        add_handler(NtQueryDirectoryObject);
         add_handler(NtCreateDirectoryObject);
         add_handler(NtTraceEvent);
         add_handler(NtAllocateVirtualMemoryEx);

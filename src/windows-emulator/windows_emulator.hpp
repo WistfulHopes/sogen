@@ -336,6 +336,23 @@ namespace sogen
         // host pointer has no meaning in one.
         std::map<uint32_t, std::shared_ptr<host_page_buffer>> shared_section_backings{};
 
+        // Armed watchpoints over shared-section views. See the violation hook: the view is made
+        // inaccessible so the next touch faults, is reported, and is then restored.
+        struct section_watch
+        {
+            size_t length{};
+            nt_memory_permission original{};
+            bool armed{};
+            bool report_after{};
+        };
+
+        std::map<uint64_t, section_watch> watched_sections_{};
+
+      public:
+
+        // Makes the next access to `address`..+length fault once so it can be attributed.
+        void arm_section_watch(uint64_t address, size_t length);
+
         void handle_ui_event(const ui_event& event);
         void deliver_raw_input(const process_context::raw_input_payload& payload, hwnd explicit_target);
         void deliver_raw_mouse_input(int32_t dx, int32_t dy, uint16_t button_flags, uint16_t button_data = 0);

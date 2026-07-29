@@ -822,6 +822,25 @@ namespace sogen
         return child_ptr;
     }
 
+    void windows_emulator::arm_section_watch(const uint64_t address, const size_t length)
+    {
+        const auto region = this->memory.get_region_info(address);
+
+        auto& watch = this->watched_sections_[address];
+        if (watch.armed)
+        {
+            return;
+        }
+
+        watch.length = length;
+        watch.original = region.permissions;
+
+        if (this->memory.protect_memory(address, length, memory_permission::none))
+        {
+            watch.armed = true;
+        }
+    }
+
     bool windows_emulator::has_live_children() const
     {
         return std::ranges::any_of(this->children_, [](const auto& child) { return !child->process.exit_status.has_value(); });
@@ -1488,6 +1507,68 @@ namespace sogen
                 if (actual_gs_base != required_gs_base)
                 {
                     acting.set_segment_base(x86_register::gs, required_gs_base);
+                    return memory_violation_continuation::restart;
+                }
+            }
+
+            // Watchpoint on a shared section: the page is deliberately made inaccessible so the
+            // first touch faults here. Report who touched it and what offset, restore access,
+            // and restart the instruction -- the guest never sees an exception. This is the
+            // only way to observe the parent's polling: it reads plain memory, issuing no
+            // syscalls, and MMIO-backing the view instead makes WHP fail to emulate the access.
+            if (!this->watched_sections_.empty())
+            {
+                for (auto& [watch_base, watch] : this->watched_sections_)
+                {
+                    if (address < watch_base || address >= watch_base + watch.length)
+                    {
+                        continue;
+                    }
+
+                    const auto rip = acting.read_instruction_pointer();
+                    const auto* mod = this->mod_manager.find_by_address(rip);
+
+                    std::array<uint8_t, 8> before{};
+                    this->memory.protect_memory(watch_base, watch.length, watch.original);
+                    this->memory.try_read_memory(watch_base, before.data(), before.size());
+
+                    this->log.print(color::pink,
+                                    "[WATCH] %s offset 0x%" PRIx64 " rip 0x%" PRIx64 " (%s+0x%" PRIx64
+                                    ") pre=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                    operation == memory_operation::write ? "WRITE" : "read ", address - watch_base, rip,
+                                    mod ? mod->name.c_str() : "?", mod ? rip - mod->image_base : 0, before[0], before[1], before[2],
+                                    before[3], before[4], before[5], before[6], before[7]);
+
+                    // The access is `lock cmpxchg [rsi], r14d`: rax is the value the parent
+                    // expects to find, r14d what it wants to store. Logging them says what the
+                    // other side must write for the exchange to succeed.
+                    this->log.print(color::pink,
+                                    "[WATCH] regs rax=0x%" PRIx64 " r14=0x%" PRIx64 " rsi=0x%" PRIx64 " rcx=0x%" PRIx64 "\n",
+                                    acting.reg<uint64_t>(x86_register::rax), acting.reg<uint64_t>(x86_register::r14),
+                                    acting.reg<uint64_t>(x86_register::rsi), acting.reg<uint64_t>(x86_register::rcx));
+
+                    watch.report_after = true;
+
+                    // Dump the faulting instruction once. The access is a read-modify-write that
+                    // leaves memory unchanged, which reads like a failing compare-exchange; the
+                    // operands say what value the parent is actually waiting for.
+                    static bool dumped_code = false;
+                    if (!dumped_code)
+                    {
+                        dumped_code = true;
+                        std::vector<uint8_t> code(0x80);
+                        if (this->memory.try_read_memory(rip - 0x20, code.data(), code.size()))
+                        {
+                            if (FILE* f = fopen("C:\\dev\\tokon\\dumps\\watch_rip.bin", "wb"))
+                            {
+                                fwrite(code.data(), 1, code.size(), f);
+                                fclose(f);
+                            }
+                            this->log.print(color::pink, "[WATCH] dumped 0x80 bytes from 0x%" PRIx64 " (rip-0x20)\n", rip - 0x20);
+                        }
+                    }
+
+                    watch.armed = false;
                     return memory_violation_continuation::restart;
                 }
             }

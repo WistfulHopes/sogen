@@ -675,6 +675,120 @@ namespace sogen
                     }
                 }
 
+                // Once the child has posted, re-arm a watchpoint over the shared view every so
+                // often. Each arming catches exactly one parent access and disarms, so this
+                // samples what the parent's spin actually touches without permanently
+                // trapping every access.
+                static const bool watch_section = [] {
+                    const auto* enabled = std::getenv("SOGEN_WATCH_SECTION");
+                    return enabled && enabled[0] == '1';
+                }();
+
+                if (watch_section)
+                {
+                    // A watch hit reports the mailbox as it was BEFORE the faulting write; this
+                    // reports it again afterwards, so the pair brackets the parent's write.
+                    for (auto& [watch_base, watch] : c.win_emu.watched_sections_)
+                    {
+                        if (!watch.report_after)
+                        {
+                            continue;
+                        }
+
+                        watch.report_after = false;
+
+                        std::array<uint8_t, 8> after{};
+                        if (c.win_emu.memory.try_read_memory(watch_base, after.data(), after.size()))
+                        {
+                            c.win_emu.log.print(color::pink, "[WATCH] post=%02x %02x %02x %02x %02x %02x %02x %02x\n", after[0],
+                                                after[1], after[2], after[3], after[4], after[5], after[6], after[7]);
+                        }
+                    }
+                }
+
+                // Armed regardless of request_pending: whether the parent touches the mailbox
+                // BEFORE the child posts is exactly what says which side is meant to move first.
+                if (watch_section)
+                {
+                    static uint64_t rearm = 0;
+                    if ((++rearm % 64) == 0)
+                    {
+                        for (auto& [sec_handle, sec] : c.proc.sections)
+                        {
+                            if (sec.backing_address && c.win_emu.shared_section_backings.contains(sec_handle))
+                            {
+                                c.win_emu.arm_section_watch(sec.backing_address,
+                                                            static_cast<size_t>(page_align_up(sec.maximum_size)));
+                            }
+                        }
+                    }
+                }
+
+                // The parent suspends a worker just before spawning the child and never resumes
+                // it. Its spin waits for the mailbox to reach 6 while the child only ever gets
+                // it to 2, so something has to make that transition -- the suspended worker is
+                // the only candidate. Force it runnable to test that.
+                static const bool resume_parent_threads = [] {
+                    const auto* enabled = std::getenv("SOGEN_RESUME_PARENT_THREADS");
+                    return enabled && enabled[0] == '1';
+                }();
+
+                if (resume_parent_threads && request_pending)
+                {
+                    for (auto& thread : c.proc.threads | std::views::values)
+                    {
+                        if (thread.suspended > 0 && !thread.is_terminated())
+                        {
+                            c.win_emu.log.print(color::pink, "[RESUME] parent tid %u suspended=%u -> 0\n", thread.id,
+                                                thread.suspended);
+                            thread.suspended = 0;
+                        }
+                    }
+                }
+
+                // The parent's cmpxchg waits for the mailbox to read 6 and nothing in our run
+                // ever puts it there. Poking that value in makes the exchange succeed, so the
+                // protocol can be driven forward one state at a time to see what it expects
+                // next. Diagnostic, not a fix.
+                static const uint32_t poke_value = [] {
+                    const auto* value = std::getenv("SOGEN_POKE_MAILBOX");
+                    return value ? static_cast<uint32_t>(strtoul(value, nullptr, 0)) : 0u;
+                }();
+
+                // Poking 6 once advanced the protocol a full step: the parent's cmpxchg fired
+                // and the child's argument at 0x40 was consumed. So keep supplying it whenever
+                // the child has a request outstanding, standing in for whichever participant
+                // normally rings that doorbell.
+                if (poke_value)
+                {
+                    static const uint32_t trigger = [] {
+                        const auto* value = std::getenv("SOGEN_POKE_WHEN");
+                        return value ? static_cast<uint32_t>(strtoul(value, nullptr, 0)) : 2u;
+                    }();
+
+                    static uint64_t pokes = 0;
+                    for (auto& [sec_handle, sec] : c.proc.sections)
+                    {
+                        if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                        {
+                            continue;
+                        }
+
+                        if (c.emu.read_memory<uint32_t>(sec.backing_address) != trigger)
+                        {
+                            continue;
+                        }
+
+                        c.emu.write_memory<uint32_t>(sec.backing_address, poke_value);
+
+                        if (++pokes <= 40 || (pokes % 500) == 0)
+                        {
+                            c.win_emu.log.print(color::pink, "[POKE] #%llu mailbox[0] 0x%X -> 0x%X\n",
+                                                static_cast<unsigned long long>(pokes), trigger, poke_value);
+                        }
+                    }
+                }
+
                 static uint64_t parent_yields = 0;
                 if ((++parent_yields % (request_pending ? ratio : 1)) == 0)
                 {
@@ -871,6 +985,44 @@ namespace sogen
                     catch (...)
                     {
                     }
+                }
+            }
+
+            // One-shot survey of the main image's page protections. Theia marks executable
+            // pages PAGE_NOACCESS and decrypts them on an execute fault, so the count of
+            // inaccessible pages is the size of the job a page sweep would have.
+            {
+                static bool surveyed = false;
+                if (!surveyed && c.win_emu.mod_manager.executable)
+                {
+                    surveyed = true;
+                    const auto& exe = *c.win_emu.mod_manager.executable;
+
+                    size_t readable = 0;
+                    size_t inaccessible = 0;
+                    size_t uncommitted = 0;
+
+                    for (uint64_t page = exe.image_base; page < exe.image_base + exe.size_of_image; page += 0x1000)
+                    {
+                        const auto region = c.win_emu.memory.get_region_info(page);
+                        if (!region.is_committed)
+                        {
+                            ++uncommitted;
+                        }
+                        else if (region.permissions.common == memory_permission::none)
+                        {
+                            ++inaccessible;
+                        }
+                        else
+                        {
+                            ++readable;
+                        }
+                    }
+
+                    c.win_emu.log.print(color::pink,
+                                        "[PAGESURVEY] %s base=0x%" PRIx64 " size=0x%" PRIx64
+                                        " -> readable=%zu inaccessible=%zu uncommitted=%zu\n",
+                                        exe.name.c_str(), exe.image_base, exe.size_of_image, readable, inaccessible, uncommitted);
                 }
             }
 
