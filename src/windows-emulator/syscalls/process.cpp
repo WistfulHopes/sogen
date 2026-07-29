@@ -398,9 +398,7 @@ namespace sogen
             }
 
             default:
-                c.win_emu.log.error("Unsupported process info class: 0x%X\n", info_class);
-                c.emu.stop();
-
+                c.win_emu.log.error("Unsupported process info class: 0x%X (returning NOT_SUPPORTED, continuing)\n", info_class);
                 return STATUS_NOT_SUPPORTED;
             }
         }
@@ -654,7 +652,10 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                c.win_emu.log.print(color::cyan, "[TOKEN] NtOpenProcessToken(non-current h=0x%" PRIx64 ") -> CURRENT_PROCESS_TOKEN\n",
+                                    process_handle.bits);
+                token_handle.write(CURRENT_PROCESS_TOKEN);
+                return STATUS_SUCCESS;
             }
 
             token_handle.write(CURRENT_PROCESS_TOKEN);

@@ -625,6 +625,7 @@ namespace sogen
 
     constexpr auto KNOWN_DLLS_SYMLINK = make_pseudo_handle(0x1, handle_types::symlink);
     constexpr auto KNOWN_DLLS32_SYMLINK = make_pseudo_handle(0x2, handle_types::symlink);
+    constexpr auto DOS_DEVICE_SYMLINK = make_pseudo_handle(0x3, handle_types::symlink);
     constexpr auto SHARED_SECTION = make_pseudo_handle(0x1, handle_types::section);
     constexpr auto DBWIN_BUFFER = make_pseudo_handle(0x2, handle_types::section);
 

@@ -2375,7 +2375,9 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            return STATUS_NOT_SUPPORTED;
+            c.win_emu.log.print(color::cyan, "[SYMLINK] open '%s' -> DOS_DEVICE_SYMLINK\n", u16_to_u8(object_name).c_str());
+            link_handle.write(DOS_DEVICE_SYMLINK);
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtQuerySymbolicLinkObject(const syscall_context& c, const handle link_handle,
@@ -2413,6 +2415,11 @@ namespace sogen
             if (link_handle == KNOWN_DLLS32_SYMLINK)
             {
                 return write_target((system_root / "SysWOW64").u16string());
+            }
+
+            if (link_handle == DOS_DEVICE_SYMLINK)
+            {
+                return write_target(u"\\Device\\HarddiskVolume3");
             }
 
             return STATUS_NOT_SUPPORTED;
