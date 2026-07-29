@@ -304,7 +304,55 @@ namespace sogen
 
             proc_params.Environment = allocator.copy_string(u"=::=::\\");
 
-            const auto env_map = get_environment_variables(win_emu.registry, version, app_settings);
+            auto env_map = get_environment_variables(win_emu.registry, version, app_settings);
+
+            // ---- Theia "packer child" emulation -------------------------------------
+            // Theia's parent spawns runtime.dll as a child process and then parks its own
+            // thread forever on NtWaitForSingleObject(NtCurrentProcess()) -- so the CHILD
+            // is the real game process. Rather than emulate both, runtime.dll can be run
+            // directly as the main image, provided it sees what the parent would have
+            // passed it: a shared section handle in PACKER_SECTION plus PACKER_FUNCTIONALITY.
+            // Without them it prints "You aren't supposed to be here" and exits.
+            //
+            // Both values are raw little-endian bytes encoded as UTF-16 with 0x100 added
+            // to each byte, so the environment block contains no embedded NULs.
+            //
+            // Enabled with:  --env PACKER_CHILD 1
+            if (const auto it = env_map.find(u"PACKER_CHILD"); it != env_map.end() && it->second == u"1")
+            {
+                section packer_section{};
+                packer_section.maximum_size = 0x10000;
+                packer_section.section_page_protection = PAGE_READWRITE;
+                packer_section.allocation_attributes = SEC_COMMIT;
+
+                const auto section_handle = this->sections.store(std::move(packer_section));
+
+                const auto encode = [](const uint64_t value, const size_t bytes) {
+                    std::u16string out;
+                    for (size_t i = 0; i < bytes; ++i)
+                    {
+                        out.push_back(static_cast<char16_t>(0x100 + ((value >> (i * 8)) & 0xFF)));
+                    }
+                    return out;
+                };
+
+                // PACKER_FUNCTIONALITY is a flags word; the real parent passes 0x00010000.
+                // Take the value from `--env PACKER_CHILD <hex>` so it can be swept without
+                // rebuilding ("1" keeps the observed default).
+                uint64_t functionality = 0x00010000;
+                if (it->second != u"1")
+                {
+                    functionality = std::strtoull(u16_to_u8(it->second).c_str(), nullptr, 16);
+                }
+
+                env_map[u"PACKER_SECTION"] = encode(section_handle.bits, 8);
+                env_map[u"PACKER_FUNCTIONALITY"] = encode(functionality, 4);
+                env_map.erase(u"PACKER_CHILD");
+
+                win_emu.log.print(color::green,
+                                  "[PACKERCHILD] injected PACKER_SECTION=0x%" PRIx64 " + PACKER_FUNCTIONALITY=0x%" PRIx64 "\n",
+                                  section_handle.bits, functionality);
+            }
             for (const auto& [name, value] : env_map)
             {
                 std::u16string entry;

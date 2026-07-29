@@ -310,7 +310,7 @@ namespace sogen
 
             if (!io_completion_wait::is_wait_completion_target_type(resolved_target_handle))
             {
-                c.win_emu.log.error("Wait handle type not supported: %u\n", static_cast<uint32_t>(resolved_target_handle.value.type));
+                c.win_emu.log.error("Wait handle type not supported: %u (raw 0x%llx)\n", static_cast<uint32_t>(resolved_target_handle.value.type), static_cast<unsigned long long>(resolved_target_handle.bits));
                 return STATUS_INVALID_HANDLE;
             }
 

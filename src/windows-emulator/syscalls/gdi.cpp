@@ -2768,9 +2768,67 @@ namespace sogen
             return required;
         }
 
-        BOOL handle_NtGdiGetTextExtent(const syscall_context& c, const hdc dc, const emulator_pointer /*text*/, const int32_t char_count,
+        BOOL handle_NtGdiGetTextExtent(const syscall_context& c, const hdc dc, const emulator_pointer text, const int32_t char_count,
                                        const emulator_pointer size, const ULONG /*flags*/)
         {
+            // DIAGNOSTIC: the emulated game lays out a #32770 message box just before it
+            // dies, and hundreds of these calls measure its text. Dumping the string is
+            // the most direct way to learn what error it is actually reporting.
+            if (text && char_count > 0 && char_count < 512)
+            {
+                try
+                {
+                    std::u16string str(static_cast<size_t>(char_count), u'\0');
+                    c.emu.read_memory(text, str.data(), static_cast<size_t>(char_count) * sizeof(char16_t));
+                    const auto utf8 = u16_to_u8(str);
+                    if (utf8.find_first_not_of(" \t\r\n") != std::string::npos)
+                    {
+                        c.win_emu.log.print(color::green, "[MSGTEXT] %s\n", utf8.c_str());
+                    }
+
+                    // Theia's anti-tamper message. Its address is computed obfuscated, so it
+                    // has no static xref -- walk the guest stack instead and report every
+                    // return address that lands inside runtime.dll. Those frames are the
+                    // Theia code that decided to show the box, i.e. the check we must satisfy.
+                    if (utf8.find("supposed to be here") != std::string::npos)
+                    {
+                        static bool reported = false;
+                        if (!reported)
+                        {
+                            reported = true;
+                            const auto* rt = c.win_emu.mod_manager.find_by_name("runtime.dll");
+                            if (rt)
+                            {
+                                const auto lo = rt->image_base;
+                                const auto hi = rt->image_base + rt->size_of_image;
+                                const auto rsp = c.emu.reg<uint64_t>(x86_register::rsp);
+                                c.win_emu.log.print(color::red, "[TAMPER] stack walk from rsp=0x%" PRIx64 " (runtime.dll 0x%" PRIx64 ")\n",
+                                                    rsp, lo);
+                                for (uint64_t i = 0; i < 768; ++i)
+                                {
+                                    try
+                                    {
+                                        const auto v = c.emu.read_memory<uint64_t>(rsp + i * 8);
+                                        if (v >= lo && v < hi)
+                                        {
+                                            c.win_emu.log.print(color::red, "[TAMPER]   +0x%03" PRIx64 "  0x%" PRIx64 "  RVA 0x%" PRIx64 "\n",
+                                                                i * 8, v, v - lo);
+                                        }
+                                    }
+                                    catch (...)
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+
             if (dc == 0 || size == 0 || char_count < 0)
             {
                 return FALSE;

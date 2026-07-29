@@ -1,4 +1,6 @@
 #include "../std_include.hpp"
+
+#include <set>
 #include "../cpu_context.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
@@ -627,6 +629,179 @@ namespace sogen
 
         NTSTATUS handle_NtYieldExecution(const syscall_context& c)
         {
+            // A child yields because it is waiting on its parent -- and the parent is stopped
+            // for as long as this slice runs. End the slice immediately so the parent gets to
+            // run and answer; the parent's own yield resumes this child right where it left
+            // off. Without this the two sides only ping in one direction and the child gives
+            // up after a handful of spins.
+            if (c.win_emu.is_child())
+            {
+                c.win_emu.yield_thread(c.vcpu);
+                c.win_emu.stop();
+                return STATUS_SUCCESS;
+            }
+
+            // Theia's parent busy-waits here while its child works, which makes this the
+            // natural place to interleave the two emulated processes: every yield hands each
+            // live child another instruction slice. Without it the handshake deadlocks --
+            // both sides poll the shared section, so neither can run while the other is
+            // stopped.
+            if (c.win_emu.has_live_children())
+            {
+                // Parent spins per child slice. While the child is still booting it needs
+                // every slice it can get, but once it has posted a request into the mailbox it
+                // only polls -- and it gives up after three polls. The parent's spin is
+                // control-flow-flattened, so servicing that request takes it many iterations;
+                // at 1:1 the child times out before the parent ever gets there.
+                static const uint64_t ratio = [] {
+                    const auto* env = getenv("SOGEN_CHILD_YIELD_RATIO");
+                    return env ? std::max<uint64_t>(1, strtoull(env, nullptr, 10)) : 1;
+                }();
+
+                bool request_pending = false;
+                for (auto& [sec_handle, sec] : c.proc.sections)
+                {
+                    if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        request_pending |= c.emu.read_memory<uint8_t>(sec.backing_address) != 0;
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+
+                static uint64_t parent_yields = 0;
+                if ((++parent_yields % (request_pending ? ratio : 1)) == 0)
+                {
+                    // Parent and child never execute at the same time, so sampling the mailbox
+                    // either side of the slice attributes every change to one of them. Which
+                    // side clears the child's request byte is the whole question.
+                    const auto sample = [&c] {
+                        std::array<uint8_t, 8> bytes{};
+                        for (auto& [sec_handle, sec] : c.proc.sections)
+                        {
+                            if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                            {
+                                continue;
+                            }
+                            try
+                            {
+                                c.emu.read_memory(sec.backing_address, bytes.data(), bytes.size());
+                            }
+                            catch (...)
+                            {
+                            }
+                        }
+                        return bytes;
+                    };
+
+                    const auto before = sample();
+                    c.win_emu.run_children_slice(CHILD_SLICE_INSTRUCTIONS);
+                    const auto after = sample();
+
+                    static std::array<uint8_t, 8> previous_after{};
+                    static bool have_previous = false;
+
+                    if (have_previous && previous_after != before)
+                    {
+                        c.win_emu.log.print(color::pink, "[WROTE] PARENT changed mailbox [0]: %02x -> %02x\n", previous_after[0],
+                                            before[0]);
+                    }
+
+                    if (before != after)
+                    {
+                        c.win_emu.log.print(color::pink, "[WROTE] CHILD changed mailbox [0]: %02x -> %02x\n", before[0], after[0]);
+                    }
+
+                    previous_after = after;
+                    have_previous = true;
+
+                    // The parent never writes to the section across thousands of spins, so the
+                    // question is whether its responder thread is simply never runnable.
+                    static uint64_t slice_count = 0;
+                    if ((++slice_count % 200) == 0)
+                    {
+                        for (auto& thread : c.proc.threads | std::views::values)
+                        {
+                            c.win_emu.log.print(color::pink,
+                                                "[PTHREAD] tid %u ip=0x%" PRIx64 " terminated=%d suspended=%u awaits=%zu "
+                                                "await_time=%d alertable=%d apcs=%zu\n",
+                                                thread.id, thread.current_ip, thread.is_terminated() ? 1 : 0, thread.suspended,
+                                                thread.await_objects.size(), thread.await_time.has_value() ? 1 : 0,
+                                                thread.apc_alertable ? 1 : 0, thread.pending_apcs.size());
+                        }
+                    }
+                }
+            }
+
+            // Watch the shared mailbox. The child posts a request into the section and polls
+            // for the parent's answer, so these bytes are the whole conversation. Dense at
+            // first because the handshake plays out within the first few hundred yields, then
+            // sparse. Not gated on has_live_children: the state AFTER a child gives up is
+            // exactly what says whether the parent ever answered.
+            {
+                static uint64_t yield_count = 0;
+                ++yield_count;
+
+                if (!c.win_emu.shared_section_backings.empty() && (yield_count <= 400 || (yield_count % 2000) == 0))
+                {
+                    for (auto& [sec_handle, sec] : c.proc.sections)
+                    {
+                        if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                        {
+                            continue;
+                        }
+
+                        std::array<uint8_t, 16> head{};
+                        std::array<uint8_t, 16> at_0x40{};
+                        try
+                        {
+                            c.emu.read_memory(sec.backing_address, head.data(), head.size());
+                            c.emu.read_memory(sec.backing_address + 0x40, at_0x40.data(), at_0x40.size());
+                        }
+                        catch (...)
+                        {
+                            continue;
+                        }
+
+                        static std::array<uint8_t, 16> last_head{};
+                        static std::array<uint8_t, 16> last_0x40{};
+                        static bool logged_once = false;
+
+                        // Only report when something actually changed, otherwise the parent's
+                        // spin buries the log.
+                        if (logged_once && head == last_head && at_0x40 == last_0x40)
+                        {
+                            continue;
+                        }
+
+                        last_head = head;
+                        last_0x40 = at_0x40;
+                        logged_once = true;
+
+                        std::string line{};
+                        for (const auto b : head)
+                        {
+                            line += std::format("{:02x} ", b);
+                        }
+                        line += " | 0x40: ";
+                        for (const auto b : at_0x40)
+                        {
+                            line += std::format("{:02x} ", b);
+                        }
+
+                        c.win_emu.log.print(color::cyan, "[MAILBOX] yield %llu section %u: %s\n",
+                                            static_cast<unsigned long long>(yield_count), static_cast<unsigned>(sec_handle),
+                                            line.c_str());
+                    }
+                }
+            }
+
             c.win_emu.yield_thread(c.vcpu);
             return STATUS_SUCCESS;
         }

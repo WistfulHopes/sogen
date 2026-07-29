@@ -4,6 +4,7 @@
 #include "devices/afd_endpoint.hpp"
 #include "devices/mount_point_manager.hpp"
 #include "devices/security_support_provider.hpp"
+#include "devices/eac_device.hpp"
 #include "devices/named_pipe.hpp"
 #include "devices/network_store_interface.hpp"
 #include "devices/gpu_bridge.hpp"
@@ -101,6 +102,9 @@ namespace sogen
             {u"Nsi"sv, create_network_store_interface},
             {u"MountPointManager"sv, create_mount_point_manager},
             {u"KsecDD"sv, create_security_support_provider},
+            // Theia's anti-tamper handshake target. Without it Theia errors out and never
+            // starts decrypting pages, which is the whole reason we are emulating at all.
+            {u"EasyAntiCheat_EOS"sv, create_eac_device},
             {u"NamedPipe"sv, create_named_pipe_device},
             {u"SogenGpu"sv, create_gpu_bridge},
             {u"SogenSteam"sv, create_steam_bridge},

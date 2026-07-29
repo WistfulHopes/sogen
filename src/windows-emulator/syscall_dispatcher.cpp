@@ -90,7 +90,28 @@ namespace sogen
         {
             if (entry == this->handlers_.end())
             {
-                win_emu.log.error("Invalid syscall id: 0x%X (raw: 0x%X)\n", syscall_id, raw_syscall_id);
+                // Windows does NOT terminate the process on a bogus syscall number: the
+                // kernel returns STATUS_INVALID_SYSTEM_SERVICE and execution resumes at
+                // the instruction after `syscall`.
+                //
+                // Theia depends on exactly that. runtime.dll RVA 0x898380 is:
+                //     31 c0              xor  eax, eax
+                //     8b 00              mov  eax, [rax]     ; deliberate null-read fault
+                //     b8 ff 0f 00 00     mov  eax, 0FFFh     ; deliberately bogus SSN
+                //     0f 05              syscall
+                //     c3                 ret
+                // a fault-then-invalid-syscall anti-emulation probe. Calling stop() here
+                // fails the probe and kills the run before the packer ever gets going.
+                //
+                // An id ABOVE the highest service we know about cannot be a real service,
+                // so mimic the kernel and continue. An id inside the known range that we
+                // simply lack is still a genuine gap, and keeps failing loudly.
+                // (A range guard is useless here: handlers_ also holds win32k ids >= 0x1000,
+                //  so 0xFFF is not "out of range". Windows returns the error for ANY id that
+                //  is absent from the SSDT, so do the same unconditionally -- log loudly, but
+                //  do NOT stop. Genuine gaps stay visible in the log as "Unknown syscall".)
+                win_emu.log.error("Unknown syscall: 0x%X (raw: 0x%X) -> STATUS_INVALID_SYSTEM_SERVICE (continuing)\n",
+                                  syscall_id, raw_syscall_id);
                 win_emu.callbacks.on_suspicious_activity("Invalid syscall id");
                 c.emu.reg<uint64_t>(x86_register::rax, STATUS_INVALID_SYSTEM_SERVICE);
                 return;
@@ -113,15 +134,20 @@ namespace sogen
 
             entry->second.handler(c);
 
-            static const bool trace_not_supported = [] {
-                const auto* enabled = std::getenv("SOGEN_TRACE_NOT_SUPPORTED");
-                return enabled && enabled[0] == '1';
-            }();
-
-            if (trace_not_supported &&
-                (emu.reg<uint64_t>(x86_register::rax) & 0xFFFFFFFF) == static_cast<uint32_t>(STATUS_NOT_SUPPORTED))
+            // DIAGNOSTIC: Theia aborts init with a message box reading
+            // "The program encountered C00000BB at 0159421E during initialization."
+            // C00000BB is STATUS_NOT_SUPPORTED, so report every syscall that returns it.
             {
-                win_emu.log.error("Syscall %s returned STATUS_NOT_SUPPORTED (0x%" PRIx64 ")\n", entry->second.name.c_str(), address);
+                const auto ret = emu.reg<uint64_t>(x86_register::rax);
+                // Any NT error status (severity 0b11). Theia reports several verbatim in its
+                // own dialogs, and the ones that matter are not just STATUS_NOT_SUPPORTED
+                // (0xC00000BB) / STATUS_INVALID_CID (0xC000000B) -- a child failing to map
+                // its inherited section returns STATUS_INVALID_HANDLE (0xC0000008).
+                if ((ret & 0xFFFFFFFFull) >= 0xC0000000ull && ret <= 0xFFFFFFFFull)
+                {
+                    win_emu.log.print(color::red, "[FAILRET] %s (0x%X) returned 0x%" PRIx64 " at 0x%" PRIx64 "\n",
+                                      entry->second.name.c_str(), syscall_id, ret, address);
+                }
             }
 
             dispatch_callback(win_emu, entry->second.name);
@@ -157,11 +183,33 @@ namespace sogen
 
             auto rip_old = emu.reg<uint64_t>(x86_register::rip);
 
-            // The increase in RIP caused by executing the syscall here has not yet occurred.
-            // If RIP is set directly, it will lead to an incorrect address, so the length of
-            // the syscall instruction needs to be subtracted.
-            emu.reg<uint64_t>(x86_register::rip, context.instrumentation_callback - syscall_instruction_size);
-            emu.reg<uint64_t>(x86_register::r10, rip_old + syscall_instruction_size);
+            // The original code always subtracted 2, assuming the backend has NOT yet
+            // advanced RIP past the 2-byte `syscall` and will add it after this hook.
+            // That holds for unicorn/icicle but NOT for WHP, where RIP is already past
+            // the instruction. Under WHP the compensation lands 2 bytes early -- and when
+            // Theia's callback sits directly after its own syscall, those 2 bytes ARE the
+            // `syscall`, so it re-executes forever with whatever stale value is left in
+            // eax (observed: repeated dispatches at one rip, raw ids 0x0/0x8/0xC0000008).
+            //
+            // Decide empirically instead of per-backend: if RIP still points at `0F 05`
+            // the backend has not advanced yet.
+            bool rip_still_at_syscall = false;
+            try
+            {
+                rip_still_at_syscall = (emu.read_memory<uint16_t>(rip_old) == 0x050F);
+            }
+            catch (...)
+            {
+            }
+
+            // Windows hands the callback the RETURN address (after the syscall) in r10.
+            const auto return_rip = rip_still_at_syscall ? rip_old + syscall_instruction_size : rip_old;
+
+            emu.reg<uint64_t>(x86_register::rip, rip_still_at_syscall
+                                                     ? context.instrumentation_callback - syscall_instruction_size
+                                                     : context.instrumentation_callback);
+
+            emu.reg<uint64_t>(x86_register::r10, return_rip);
         }
     }
 

@@ -213,6 +213,26 @@ namespace sogen
             return this->store_and_get(std::move(value)).first;
         }
 
+        // Stores at a caller-chosen index so an exact handle VALUE can be reproduced.
+        // Handle inheritance needs this: a child process is handed a numeric handle by its
+        // parent (Theia passes one through the environment) and must find the same object
+        // behind it. Returns {handle, nullptr} if the index is already occupied.
+        std::pair<handle, T*> store_at_index(const index_type index, T value)
+        {
+            if (this->block_mutation_)
+            {
+                throw std::runtime_error("Mutation of handle store is blocked!");
+            }
+
+            const auto [it, inserted] = this->store_.emplace(index, std::move(value));
+            if (!inserted)
+            {
+                return {make_handle(index), nullptr};
+            }
+
+            return {make_handle(index), &it->second};
+        }
+
         handle make_handle(const index_type index) const
         {
             handle h{};
@@ -222,6 +242,13 @@ namespace sogen
             h.value.id = index << IndexShift;
 
             return h;
+        }
+
+        // Inverse of make_handle. Lets callers key side tables by index without repeating
+        // this store's IndexShift.
+        static index_type index_of(const handle h)
+        {
+            return static_cast<index_type>(h.value.id) >> IndexShift;
         }
 
         T* get_by_index(const uint32_t index)
@@ -625,6 +652,17 @@ namespace sogen
     constexpr uint32_t STEAM_FAKE_PROCESS_ID = 0x8B0;
     constexpr auto STEAM_PROCESS_HANDLE = make_pseudo_handle(0x1, handle_types::process);
 
+    // Synthetic "packer child" process/thread. Theia spawns runtime.dll as a real child
+    // process during init (NtCreateUserProcess, image == cmdline == runtime.dll, which is
+    // an EXE despite the extension). sogen has no child-process support, so it stubbed the
+    // call with STATUS_NOT_SUPPORTED -- and Theia reports that verbatim
+    // ("The program encountered C00000BB ... during initialization") and aborts.
+    //
+    // These give it handles that read as a live-but-inert process, the same trick already
+    // used for the synthetic Steam process, so init can proceed far enough to observe what
+    // Theia actually expects the child to do.
+    constexpr auto PACKER_CHILD_PROCESS_HANDLE = make_pseudo_handle(0x2, handle_types::process);
+    constexpr auto PACKER_CHILD_THREAD_HANDLE = make_pseudo_handle(0x2, handle_types::thread);
     constexpr auto REMOTE_PARENT_PROCESS_HANDLE = make_handle(0x3, handle_types::process, false);
 
     constexpr auto CURRENT_PROCESS = make_handle(~0ULL);

@@ -550,7 +550,7 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtOpenProcess(const syscall_context& /*c*/, const emulator_object<handle> process_handle,
+        NTSTATUS handle_NtOpenProcess(const syscall_context& c, const emulator_object<handle> process_handle,
                                       const ACCESS_MASK /*desired_access*/,
                                       const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
                                       const emulator_object<CLIENT_ID64> client_id)
@@ -581,6 +581,10 @@ namespace sogen
                 const auto* enabled = std::getenv("SOGEN_DUMPER_SHIM");
                 return enabled && enabled[0] == '1';
             }();
+            c.win_emu.log.print(color::green, "[OPENPROC] pid %" PRIu64 " (tid %" PRIu64 ") requested -> %s\n",
+                                static_cast<uint64_t>(id.UniqueProcess), static_cast<uint64_t>(id.UniqueThread),
+                                dumper_shim ? "REMOTE_PARENT_PROCESS_HANDLE" : "STATUS_INVALID_CID");
+
             if (dumper_shim)
             {
                 process_handle.write(REMOTE_PARENT_PROCESS_HANDLE);
@@ -627,6 +631,10 @@ namespace sogen
 
             if (c.proc.is_current_process_handle(process_handle))
             {
+                // The exit status names the reason Theia gave up (0xDEAD is its own
+                // "handshake failed" code), so it is worth surfacing on every run.
+                c.win_emu.log.print(color::red, "[EXITPROC] NtTerminateProcess exit_status=0x%X\n",
+                                    static_cast<uint32_t>(exit_status));
                 c.proc.exit_status = exit_status;
                 c.win_emu.stop();
                 return STATUS_SUCCESS;

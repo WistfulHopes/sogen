@@ -1124,6 +1124,80 @@ namespace sogen
 
             process_handle.write(new_handle);
 
+            // Two mutually exclusive child strategies, both opt-in.
+            //
+            // SOGEN_CHILD_EMULATOR runs the child as a SEPARATE windows_emulator: its own
+            // address space, PEB and handle table, with the section it inherits backed by one
+            // host buffer aliased into both guests. Mapping a second copy of runtime.dll into
+            // the parent's address space instead (the SOGEN_RUN_CHILD_PROCESS path below)
+            // makes Theia's two instances share globals, and the parent dies within a few
+            // instructions of the child's first null-read tripwire.
+            static const bool child_emulator = [] {
+                const auto* enabled = std::getenv("SOGEN_CHILD_EMULATOR");
+                return enabled && enabled[0] == '1';
+            }();
+
+            if (child_emulator && process_parameters)
+            {
+                auto child_path = image_path;
+                if (child_path.starts_with(u"\\??\\"))
+                {
+                    child_path.erase(0, 4);
+                }
+
+                utils::unordered_insensitive_u16string_map<std::u16string> child_env{};
+                const auto env_block = process_parameters.read().Environment;
+                if (env_block)
+                {
+                    std::u16string entry{};
+                    for (uint64_t off = 0; off < 0x8000; off += 2)
+                    {
+                        const auto ch = c.emu.read_memory<char16_t>(env_block + off);
+                        if (ch)
+                        {
+                            entry.push_back(ch);
+                            continue;
+                        }
+                        if (entry.empty())
+                        {
+                            break;
+                        }
+                        // First '=' only: Theia's values are raw bytes biased by +0x100 so the
+                        // block holds no NULs, and may contain anything.
+                        if (const auto eq = entry.find(u'='); eq != std::u16string::npos && eq > 0)
+                        {
+                            child_env.insert_or_assign(entry.substr(0, eq), entry.substr(eq + 1));
+                        }
+                        entry.clear();
+                    }
+                }
+
+                auto* child = c.win_emu.create_child_process(application_settings{
+                    .application = child_path,
+                    .environment = std::move(child_env),
+                });
+
+                if (child)
+                {
+                    for (const auto& index : c.proc.sections | std::views::keys)
+                    {
+                        c.win_emu.share_section_with_child(index, *child);
+                    }
+
+                    c.win_emu.log.print(color::green, "[CHILDPROC] ---- child emulator starting ----\n");
+                    c.win_emu.run_children_slice(CHILD_BOOT_INSTRUCTIONS);
+
+                    info.State = PsCreateSuccess;
+                    info.SuccessState.UserProcessParametersNative = process_parameters.value();
+                    create_info.write(info);
+                    thread_handle.write(make_handle(0x7F0000 + static_cast<uint32_t>(new_handle.value.id),
+                                                    handle_types::thread, false));
+                    return STATUS_SUCCESS;
+                }
+
+                c.win_emu.log.print(color::red, "[CHILDPROC] child emulator not created\n");
+            }
+
             static const bool run_child = [] {
                 const auto* enabled = std::getenv("SOGEN_RUN_CHILD_PROCESS");
                 return enabled && enabled[0] == '1';

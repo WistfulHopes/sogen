@@ -1,4 +1,6 @@
 #include "std_include.hpp"
+
+#include <set>
 #include "windows_emulator.hpp"
 
 #include "cpu_context.hpp"
@@ -517,6 +519,21 @@ namespace sogen
             const auto has_pending_status = thread.pending_status.has_value();
             const auto can_dispatch_apcs = thread.apc_alertable && !thread.pending_apcs.empty();
 
+            // DIAGNOSTIC: report the scheduling decision once per thread. Our synthetic
+            // Theia "child" thread is created but never observed running, and this is the
+            // gate that would reject it.
+            {
+                static std::set<uint32_t> reported;
+                if (reported.insert(thread.id).second)
+                {
+                    win_emu.log.print(color::cyan,
+                                      "[SCHED] tid %u: ready=%d terminated=%d suspended=%u pending_status=%d apcs=%d -> %s\n",
+                                      thread.id, is_ready ? 1 : 0, thread.is_terminated() ? 1 : 0, thread.suspended,
+                                      has_pending_status ? 1 : 0, can_dispatch_apcs ? 1 : 0,
+                                      (!is_ready && !force && !can_dispatch_apcs) ? "REJECTED" : "scheduled");
+                }
+            }
+
             if (!is_ready && !force && !can_dispatch_apcs)
             {
                 return false;
@@ -695,7 +712,8 @@ namespace sogen
 
     windows_emulator::windows_emulator(std::unique_ptr<x86_64_emulator> emu, const emulator_settings& settings,
                                        emulator_callbacks callbacks, emulator_interfaces interfaces)
-        : emu_(std::move(emu)),
+        : settings_(settings),
+          emu_(std::move(emu)),
           clock_(get_clock(interfaces, this->executed_instructions_, settings.use_relative_time)),
           dns_lookup_(get_dns_lookup(interfaces)),
           socket_factory_(get_socket_factory(interfaces)),
@@ -767,6 +785,176 @@ namespace sogen
     }
 
     windows_emulator::~windows_emulator() = default;
+
+    windows_emulator* windows_emulator::create_child_process(application_settings app_settings)
+    {
+        if (!this->callbacks.child_backend_factory)
+        {
+            return nullptr;
+        }
+
+        auto backend = this->callbacks.child_backend_factory();
+        if (!backend)
+        {
+            return nullptr;
+        }
+
+        // Headless, deliberately: SDL owns process-global state, so a child that built its
+        // own SDL backend would fight the parent for the window and the input queue.
+        emulator_interfaces interfaces{
+            .ui = std::make_unique<null_ui_backend>(),
+            .audio = std::make_unique<null_audio_backend>(),
+        };
+
+        auto child = std::make_unique<windows_emulator>(std::move(backend), std::move(app_settings), this->settings_,
+                                                        emulator_callbacks{}, std::move(interfaces));
+
+        child->is_child_ = true;
+        child->parent_ = this;
+
+        auto* child_ptr = this->children_.emplace_back(std::move(child)).get();
+
+        if (this->callbacks.on_child_created)
+        {
+            this->callbacks.on_child_created(*child_ptr);
+        }
+
+        return child_ptr;
+    }
+
+    bool windows_emulator::has_live_children() const
+    {
+        return std::ranges::any_of(this->children_, [](const auto& child) { return !child->process.exit_status.has_value(); });
+    }
+
+    bool windows_emulator::run_children_slice(const size_t instructions)
+    {
+        bool ran = false;
+
+        for (auto& child : this->children_)
+        {
+            if (child->process.exit_status.has_value())
+            {
+                continue;
+            }
+
+            try
+            {
+                child->start(instructions);
+            }
+            catch (const std::exception& e)
+            {
+                this->log.print(color::red, "[CHILDPROC] child aborted: %s\n", e.what());
+                child->process.exit_status = STATUS_UNSUCCESSFUL;
+                continue;
+            }
+
+            ran = true;
+
+            if (child->process.exit_status.has_value())
+            {
+                this->log.print(color::green, "[CHILDPROC] child exited with 0x%X\n",
+                                static_cast<uint32_t>(*child->process.exit_status));
+            }
+        }
+
+        return ran;
+    }
+
+    bool windows_emulator::share_section_with_child(const uint32_t index, windows_emulator& child)
+    {
+        auto* parent_section = this->process.sections.get_by_index(index);
+        if (!parent_section || !parent_section->file_name.empty())
+        {
+            // File-backed sections map a fresh copy of the file per view, so there is no
+            // single buffer to share.
+            return false;
+        }
+
+        const auto size = static_cast<size_t>(page_align_up(parent_section->maximum_size));
+        if (size == 0)
+        {
+            return false;
+        }
+
+        auto& backing = this->shared_section_backings[index];
+        if (!backing)
+        {
+            backing = std::make_shared<host_page_buffer>(size);
+
+            // If the parent already mapped a view, re-back it in place: same guest address,
+            // now aliased onto the host buffer. Pointers the guest already holds stay valid.
+            if (parent_section->backing_address)
+            {
+                this->memory.read_memory(parent_section->backing_address, backing->data(), size);
+                this->memory.release_memory(parent_section->backing_address, size);
+
+                const auto address = parent_section->backing_address;
+
+                // DIAGNOSTIC: trapping the parent's view instead of aliasing it reveals which
+                // offsets it actually polls while its child waits on a reply. Slower, but the
+                // parent only touches a handful of bytes here.
+                if (getenv("SOGEN_TRACE_SHARED_SECTION"))
+                {
+                    auto* buffer = backing.get();
+                    auto& logger = this->log;
+
+                    const auto trace = [address, buffer, &logger](const uint64_t addr, const size_t size, const bool write,
+                                                               const void* data) {
+                        static std::set<std::pair<uint64_t, bool>> seen;
+                        const auto offset = addr - address;
+                        if (seen.emplace(offset, write).second)
+                        {
+                            uint64_t value = 0;
+                            memcpy(&value, data, std::min<size_t>(size, sizeof(value)));
+                            logger.print(color::pink, "[SECTRACE] parent %s offset 0x%" PRIx64 " size %zu value 0x%" PRIx64 "\n",
+                                      write ? "WRITE" : "read ", offset, size, value);
+                        }
+                    };
+
+                    if (!this->memory.allocate_mmio(
+                            address, size,
+                            [buffer, address, trace](const uint64_t addr, void* data, const size_t size) {
+                                memcpy(data, buffer->data() + (addr - address), size);
+                                trace(addr, size, false, data);
+                            },
+                            [buffer, address, trace](const uint64_t addr, const void* data, const size_t size) {
+                                memcpy(buffer->data() + (addr - address), data, size);
+                                trace(addr, size, true, data);
+                            }))
+                    {
+                        this->shared_section_backings.erase(index);
+                        return false;
+                    }
+                }
+                else if (!this->memory.allocate_host_memory(address, size, backing->data(),
+                                                            map_nt_to_emulator_protection(parent_section->section_page_protection)))
+                {
+                    this->shared_section_backings.erase(index);
+                    return false;
+                }
+            }
+        }
+
+        section child_section{};
+        child_section.name = parent_section->name;
+        child_section.maximum_size = parent_section->maximum_size;
+        child_section.section_page_protection = parent_section->section_page_protection;
+        child_section.allocation_attributes = parent_section->allocation_attributes;
+
+        const auto [child_handle, stored] = child.process.sections.store_at_index(index, std::move(child_section));
+        if (!stored)
+        {
+            return false;
+        }
+
+        child.shared_section_backings[index] = backing;
+
+        this->log.print(color::green, "[SHARESEC] section index %u -> child handle 0x%" PRIx64 " (%zu bytes, host %p)\n", index,
+                        child_handle.bits, size, static_cast<void*>(backing->data()));
+
+        return true;
+    }
 
     void windows_emulator::setup_process_if_necessary()
     {
@@ -1074,6 +1262,70 @@ namespace sogen
             for (size_t i = 0; i < mod.sections.size(); ++i)
             {
                 this->install_section_first_execution_hook(mod, i);
+            }
+
+            // ---- Theia clean-DLL hook-sweep diagnostic -------------------------------
+            // Theia maps pristine copies of ntdll/kernel32/kernelbase/user32/gdi32 from
+            // \KnownDlls and diffs them against the already-loaded copies to detect
+            // inline hooks. Under emulation it finds a difference and bails with a
+            // MessageBox. When a SECOND copy of an already-loaded module appears, diff
+            // the two .text sections here and report exactly what Theia is seeing.
+            for (auto& [base, other] : this->mod_manager.modules())
+            {
+                if (base == mod.image_base || other.name != mod.name)
+                {
+                    continue;
+                }
+
+                const auto text_of = [](const mapped_module& m) -> const mapped_section* {
+                    for (const auto& sec : m.sections)
+                    {
+                        if (sec.name == ".text")
+                        {
+                            return &sec;
+                        }
+                    }
+                    return nullptr;
+                };
+
+                const auto* a = text_of(other);
+                const auto* b = text_of(mod);
+                if (!a || !b)
+                {
+                    continue;
+                }
+
+                const auto size = std::min(a->region.length, b->region.length);
+                std::vector<uint8_t> buf_a(size), buf_b(size);
+                try
+                {
+                    this->emu().read_memory(a->region.start, buf_a.data(), size);
+                    this->emu().read_memory(b->region.start, buf_b.data(), size);
+                }
+                catch (...)
+                {
+                    continue;
+                }
+
+                size_t diffs = 0;
+                this->log.print(color::yellow, "[HOOKSWEEP] %s: loaded 0x%" PRIx64 " vs clean 0x%" PRIx64 " (.text %zu bytes)\n",
+                                mod.name.c_str(), a->region.start, b->region.start, size);
+                for (size_t i = 0; i < size; ++i)
+                {
+                    if (buf_a[i] == buf_b[i])
+                    {
+                        continue;
+                    }
+                    if (++diffs <= 12)
+                    {
+                        this->log.print(color::yellow,
+                                        "[HOOKSWEEP]   +0x%zx loaded %02x %02x %02x %02x | clean %02x %02x %02x %02x\n", i,
+                                        buf_a[i], i + 1 < size ? buf_a[i + 1] : 0, i + 2 < size ? buf_a[i + 2] : 0,
+                                        i + 3 < size ? buf_a[i + 3] : 0, buf_b[i], i + 1 < size ? buf_b[i + 1] : 0,
+                                        i + 2 < size ? buf_b[i + 2] : 0, i + 3 < size ? buf_b[i + 3] : 0);
+                    }
+                }
+                this->log.print(color::yellow, "[HOOKSWEEP] %s: %zu differing bytes in .text\n", mod.name.c_str(), diffs);
             }
         });
 
