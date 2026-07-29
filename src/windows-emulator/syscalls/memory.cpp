@@ -154,6 +154,30 @@ namespace sogen
                                              const uint32_t info_class, const uint64_t memory_information,
                                              const uint64_t memory_information_length, const emulator_object<uint64_t> return_length)
         {
+            // A dumper walks its target's address space with MemoryBasicInformation before
+            // reading it, so the parent handle has to answer region queries from the parent's
+            // memory manager too.
+            if (process_handle == REMOTE_PARENT_PROCESS_HANDLE && c.win_emu.parent())
+            {
+                if (info_class != MemoryBasicInformation)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                const auto region = c.win_emu.parent()->memory.get_region_info(base_address);
+                return handle_query<MEMORY_BASIC_INFORMATION64>(
+                    c.emu, memory_information, static_cast<uint32_t>(memory_information_length),
+                    emulator_object<uint32_t>{c.emu, return_length.value()}, [&](MEMORY_BASIC_INFORMATION64& info) {
+                        info.BaseAddress = region.start;
+                        info.AllocationBase = region.allocation_base;
+                        info.AllocationProtect = 0;
+                        info.RegionSize = region.length;
+                        info.State = region.is_committed ? MEM_COMMIT : (region.is_reserved ? MEM_RESERVE : MEM_FREE);
+                        info.Protect = map_emulator_to_nt_protection(region.permissions);
+                        info.Type = MEM_PRIVATE;
+                    });
+            }
+
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 return STATUS_NOT_SUPPORTED;
@@ -648,6 +672,24 @@ namespace sogen
                                             const emulator_object<ULONG> number_of_bytes_read)
         {
             number_of_bytes_read.try_write(0);
+
+            // Theia's child is a dumper and its target is the parent process. Serve reads
+            // through the parent handle from the parent emulator's address space, so the
+            // dumper sees the real (decrypted) image rather than an empty stub.
+            if (process_handle == REMOTE_PARENT_PROCESS_HANDLE && c.win_emu.parent())
+            {
+                auto& parent_memory = c.win_emu.parent()->memory;
+
+                std::vector<uint8_t> data(number_of_bytes_to_read);
+                if (!parent_memory.try_read_memory(base_address, data.data(), data.size()))
+                {
+                    return STATUS_PARTIAL_COPY;
+                }
+
+                c.emu.write_memory(buffer, data.data(), data.size());
+                number_of_bytes_read.try_write(number_of_bytes_to_read);
+                return STATUS_SUCCESS;
+            }
 
             if (!c.proc.is_current_process_handle(process_handle))
             {

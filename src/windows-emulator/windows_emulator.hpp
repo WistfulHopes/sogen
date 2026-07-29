@@ -210,6 +210,7 @@ namespace sogen
         std::unique_ptr<audio_backend> audio_backend_{};
         bool setup_completed_{false};
         bool is_child_{false};
+        windows_emulator* parent_{};
 
         // Must outlive the syscall handler that creates them, hence owned here.
         std::vector<std::unique_ptr<windows_emulator>> children_{};
@@ -321,6 +322,13 @@ namespace sogen
         bool is_child() const
         {
             return this->is_child_;
+        }
+
+        // The emulator that spawned this one, or null. Theia's child is a dumper whose target
+        // is its parent, so a handle to the parent has to reach a real address space.
+        windows_emulator* parent() const
+        {
+            return this->parent_;
         }
 
         // Keyed by index in process.sections, so parent and child agree on the handle value.

@@ -810,6 +810,7 @@ namespace sogen
                                                         emulator_callbacks{}, std::move(interfaces));
 
         child->is_child_ = true;
+        child->parent_ = this;
 
         auto* child_ptr = this->children_.emplace_back(std::move(child)).get();
 
