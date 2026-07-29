@@ -755,21 +755,36 @@ namespace sogen
                     return value ? static_cast<uint32_t>(strtoul(value, nullptr, 0)) : 0u;
                 }();
 
-                if (poke_value && request_pending)
+                // Poking 6 once advanced the protocol a full step: the parent's cmpxchg fired
+                // and the child's argument at 0x40 was consumed. So keep supplying it whenever
+                // the child has a request outstanding, standing in for whichever participant
+                // normally rings that doorbell.
+                if (poke_value)
                 {
-                    static bool poked = false;
-                    if (!poked)
-                    {
-                        poked = true;
-                        for (auto& [sec_handle, sec] : c.proc.sections)
-                        {
-                            if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
-                            {
-                                continue;
-                            }
+                    static const uint32_t trigger = [] {
+                        const auto* value = std::getenv("SOGEN_POKE_WHEN");
+                        return value ? static_cast<uint32_t>(strtoul(value, nullptr, 0)) : 2u;
+                    }();
 
-                            c.emu.write_memory<uint32_t>(sec.backing_address, poke_value);
-                            c.win_emu.log.print(color::pink, "[POKE] mailbox[0] <- 0x%X\n", poke_value);
+                    static uint64_t pokes = 0;
+                    for (auto& [sec_handle, sec] : c.proc.sections)
+                    {
+                        if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                        {
+                            continue;
+                        }
+
+                        if (c.emu.read_memory<uint32_t>(sec.backing_address) != trigger)
+                        {
+                            continue;
+                        }
+
+                        c.emu.write_memory<uint32_t>(sec.backing_address, poke_value);
+
+                        if (++pokes <= 40 || (pokes % 500) == 0)
+                        {
+                            c.win_emu.log.print(color::pink, "[POKE] #%llu mailbox[0] 0x%X -> 0x%X\n",
+                                                static_cast<unsigned long long>(pokes), trigger, poke_value);
                         }
                     }
                 }

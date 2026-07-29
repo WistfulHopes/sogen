@@ -558,6 +558,12 @@ namespace sogen
                                                                              file_name, f);
             }
 
+            if (info_class == FileIdFullDirectoryInformation)
+            {
+                return handle_file_enumeration<FILE_ID_FULL_DIR_INFORMATION>(c, io_status_block, file_information, length, query_flags,
+                                                                             file_name, f);
+            }
+
             c.win_emu.log.error("Unsupported query directory file info class: %X\n", info_class);
             c.emu.stop();
 
@@ -1326,6 +1332,22 @@ namespace sogen
             if (!f)
             {
                 return STATUS_INVALID_HANDLE;
+            }
+
+            // A directory handle carries no FILE*, so falling through to fread() below
+            // dereferences garbage and takes the whole emulator down with no diagnostic.
+            // Windows answers a read on a directory with STATUS_INVALID_DEVICE_REQUEST.
+            if (f->is_directory())
+            {
+                if (io_status_block)
+                {
+                    IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                    block.Status = STATUS_INVALID_DEVICE_REQUEST;
+                    block.Information = 0;
+                    io_status_block.write(block);
+                }
+
+                return STATUS_INVALID_DEVICE_REQUEST;
             }
 
             if (byte_offset)
