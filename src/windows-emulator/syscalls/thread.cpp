@@ -648,7 +648,95 @@ namespace sogen
             // stopped.
             if (c.win_emu.has_live_children())
             {
-                c.win_emu.run_children_slice(CHILD_SLICE_INSTRUCTIONS);
+                // Parent spins per child slice. While the child is still booting it needs
+                // every slice it can get, but once it has posted a request into the mailbox it
+                // only polls -- and it gives up after three polls. The parent's spin is
+                // control-flow-flattened, so servicing that request takes it many iterations;
+                // at 1:1 the child times out before the parent ever gets there.
+                static const uint64_t ratio = [] {
+                    const auto* env = getenv("SOGEN_CHILD_YIELD_RATIO");
+                    return env ? std::max<uint64_t>(1, strtoull(env, nullptr, 10)) : 1;
+                }();
+
+                bool request_pending = false;
+                for (auto& [sec_handle, sec] : c.proc.sections)
+                {
+                    if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        request_pending |= c.emu.read_memory<uint8_t>(sec.backing_address) != 0;
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+
+                static uint64_t parent_yields = 0;
+                if ((++parent_yields % (request_pending ? ratio : 1)) == 0)
+                {
+                    // Parent and child never execute at the same time, so sampling the mailbox
+                    // either side of the slice attributes every change to one of them. Which
+                    // side clears the child's request byte is the whole question.
+                    const auto sample = [&c] {
+                        std::array<uint8_t, 8> bytes{};
+                        for (auto& [sec_handle, sec] : c.proc.sections)
+                        {
+                            if (!sec.backing_address || !c.win_emu.shared_section_backings.contains(sec_handle))
+                            {
+                                continue;
+                            }
+                            try
+                            {
+                                c.emu.read_memory(sec.backing_address, bytes.data(), bytes.size());
+                            }
+                            catch (...)
+                            {
+                            }
+                        }
+                        return bytes;
+                    };
+
+                    const auto before = sample();
+                    c.win_emu.run_children_slice(CHILD_SLICE_INSTRUCTIONS);
+                    const auto after = sample();
+
+                    static std::array<uint8_t, 8> previous_after{};
+                    static bool have_previous = false;
+
+                    if (have_previous && previous_after != before)
+                    {
+                        c.win_emu.log.print(color::pink, "[WROTE] PARENT changed mailbox [0]: %02x -> %02x\n", previous_after[0],
+                                            before[0]);
+                    }
+
+                    if (before != after)
+                    {
+                        c.win_emu.log.print(color::pink, "[WROTE] CHILD changed mailbox [0]: %02x -> %02x\n", before[0], after[0]);
+                    }
+
+                    previous_after = after;
+                    have_previous = true;
+
+                    // The parent never writes to the section across thousands of spins, so the
+                    // question is whether its responder thread is simply never runnable.
+                    static uint64_t slice_count = 0;
+                    if ((++slice_count % 200) == 0)
+                    {
+                        for (auto& thread : c.proc.threads | std::views::values)
+                        {
+                            c.win_emu.log.print(color::pink,
+                                                "[PTHREAD] tid %u ip=0x%" PRIx64 " terminated=%d suspended=%u awaits=%zu "
+                                                "await_time=%d alertable=%d apcs=%zu\n",
+                                                thread.id, thread.current_ip, thread.is_terminated() ? 1 : 0, thread.suspended,
+                                                thread.await_objects.size(), thread.await_time.has_value() ? 1 : 0,
+                                                thread.apc_alertable ? 1 : 0, thread.pending_apcs.size());
+                        }
+                    }
+                }
             }
 
             // Watch the shared mailbox. The child posts a request into the section and polls
