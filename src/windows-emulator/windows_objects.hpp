@@ -517,6 +517,39 @@ namespace sogen
         }
     };
 
+    struct process_object : ref_counted_object
+    {
+        std::u16string image_path{};
+        std::u16string command_line{};
+        uint32_t process_id{};
+        uint32_t thread_id{};
+
+        std::optional<NTSTATUS> exit_status{};
+
+        bool is_signaled() const
+        {
+            return this->exit_status.has_value();
+        }
+
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write(this->image_path);
+            buffer.write(this->command_line);
+            buffer.write(this->process_id);
+            buffer.write(this->thread_id);
+            buffer.write_optional(this->exit_status);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read(this->image_path);
+            buffer.read(this->command_line);
+            buffer.read(this->process_id);
+            buffer.read(this->thread_id);
+            buffer.read_optional(this->exit_status);
+        }
+    };
+
     struct mutant : ref_counted_object
     {
         uint32_t locked_count{0};

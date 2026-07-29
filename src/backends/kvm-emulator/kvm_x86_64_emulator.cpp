@@ -950,6 +950,11 @@ namespace sogen::kvm
                 return true;
             }
 
+            bool masks_trap_flag_on_syscall() const override
+            {
+                return true;
+            }
+
             bool supports_multiple_vcpus() const override
             {
                 // KVM could support multiple vCPUs per VM, but the backend is
@@ -1466,7 +1471,6 @@ namespace sogen::kvm
                 this->set_fpu(fpu);
 
                 this->set_msr(MSR_STAR, (0x23ull << 48) | (0x08ull << 32));
-                this->set_msr(MSR_SYSCALL_MASK, 0);
                 this->set_msr(MSR_SYSCALL_MASK, 0x4700);
             }
 

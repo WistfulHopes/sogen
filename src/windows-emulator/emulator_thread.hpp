@@ -318,6 +318,8 @@ namespace sogen
         bool apc_alertable{false};
         std::vector<pending_apc> pending_apcs{};
 
+        bool pending_trap_flag_restore{false};
+
         std::optional<NTSTATUS> pending_status{};
 
         uint64_t win32k_thread_info{0};

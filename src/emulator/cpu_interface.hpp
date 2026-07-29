@@ -41,6 +41,11 @@ namespace sogen
         // Hypervisor-backed backends can cancel execution from any thread; the JIT/interpreter
         // backends cannot, so they must be preempted cooperatively from the CPU thread instead.
         virtual bool is_stop_thread_safe() const = 0;
+
+        virtual bool masks_trap_flag_on_syscall() const
+        {
+            return false;
+        }
     };
 
 } // namespace sogen

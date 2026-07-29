@@ -112,6 +112,7 @@ namespace sogen
                 //  do NOT stop. Genuine gaps stay visible in the log as "Unknown syscall".)
                 win_emu.log.error("Unknown syscall: 0x%X (raw: 0x%X) -> STATUS_INVALID_SYSTEM_SERVICE (continuing)\n",
                                   syscall_id, raw_syscall_id);
+                win_emu.callbacks.on_suspicious_activity("Invalid syscall id");
                 c.emu.reg<uint64_t>(x86_register::rax, STATUS_INVALID_SYSTEM_SERVICE);
                 return;
             }
@@ -178,6 +179,8 @@ namespace sogen
 
         if (context.instrumentation_callback != 0 && syscall_name != "NtContinue")
         {
+            constexpr uint64_t syscall_instruction_size = 2;
+
             auto rip_old = emu.reg<uint64_t>(x86_register::rip);
 
             // The original code always subtracted 2, assuming the backend has NOT yet
@@ -200,10 +203,10 @@ namespace sogen
             }
 
             // Windows hands the callback the RETURN address (after the syscall) in r10.
-            const auto return_rip = rip_still_at_syscall ? rip_old + 2 : rip_old;
+            const auto return_rip = rip_still_at_syscall ? rip_old + syscall_instruction_size : rip_old;
 
             emu.reg<uint64_t>(x86_register::rip, rip_still_at_syscall
-                                                     ? context.instrumentation_callback - 2
+                                                     ? context.instrumentation_callback - syscall_instruction_size
                                                      : context.instrumentation_callback);
 
             emu.reg<uint64_t>(x86_register::r10, return_rip);
