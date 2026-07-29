@@ -940,9 +940,15 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtApphelpCacheControl()
+        NTSTATUS handle_NtApphelpCacheControl(const syscall_context& /*c*/, const uint32_t service_class,
+                                              const emulator_pointer /*service_data*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            constexpr uint32_t ApphelpCacheServiceLookup = 0; // ApphelpCacheServiceLookup / _Lookup32/64 share 0
+            if (service_class == ApphelpCacheServiceLookup)
+            {
+                return STATUS_NOT_FOUND;
+            }
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtDeviceIoControlFile(const syscall_context& c, const handle file_handle, const handle event,
