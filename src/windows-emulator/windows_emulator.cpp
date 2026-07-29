@@ -1313,6 +1313,53 @@ namespace sogen
                     {0x159585D, "page fault (sub_20159552B)"},
                 };
 
+            // SOGEN_LDRNAME=1 -- Theia's dumper calls GetModuleHandleW/LdrGetDllHandle and then
+            // goes straight to formatting its failure message, so whatever module it fails to
+            // find is what the dump needs. LdrGetDllHandle's third argument (r8) is the
+            // PUNICODE_STRING name; log it rather than guessing at dbghelp/dbgcore.
+            // Armed from runtime.dll's load, not ntdll's: ntdll is mapped during process setup,
+            // before on_module_load callbacks exist, so a branch keyed on its own load never runs.
+            if (mod.name == "runtime.dll" && getenv("SOGEN_LDRNAME"))
+            {
+                const auto* ntdll_mod = this->mod_manager.ntdll;
+                if (const auto addr = ntdll_mod ? ntdll_mod->find_export("LdrGetDllHandle") : 0)
+                {
+                    this->emu().hook_memory_execution(addr, [this](cpu_interface&, const uint64_t) {
+                        const auto us = this->emu().reg<uint64_t>(x86_register::r8);
+                        uint16_t len = 0;
+                        uint64_t buf = 0;
+                        if (!this->memory.try_read_memory(us, &len, sizeof(len)) ||
+                            !this->memory.try_read_memory(us + 8, &buf, sizeof(buf)) || !len || len > 512)
+                        {
+                            return;
+                        }
+                        std::u16string name(len / 2, u'\0');
+                        if (this->memory.try_read_memory(buf, name.data(), len))
+                        {
+                            this->log.print(color::pink, "[LDRNAME] LdrGetDllHandle('%s')\n", u16_to_u8(name).c_str());
+                        }
+                    });
+                    this->log.info("[LDRNAME] armed at 0x%" PRIx64 "\n", addr);
+                }
+
+                // Control for the hook mechanism itself. Three separate armings have now
+                // "never fired", and each was explained away as guest behaviour. Hook an
+                // address the trace shows executing repeatedly: if this stays silent, the
+                // mechanism is broken and every such conclusion drawn from it is worthless.
+                if (const auto* nt_mod = this->mod_manager.ntdll)
+                {
+                    const auto probe = nt_mod->image_base + 0x161f62; // NtQueryVirtualMemory stub
+                    this->emu().hook_memory_execution(probe, [this](cpu_interface&, const uint64_t) {
+                        static long fired = 0;
+                        if (++fired <= 3)
+                        {
+                            this->log.print(color::pink, "[HOOKTEST] fired #%ld\n", fired);
+                        }
+                    });
+                    this->log.info("[HOOKTEST] armed at 0x%" PRIx64 "\n", probe);
+                }
+            }
+
                 // SOGEN_C0210_BP=1 -- every site in runtime.dll that loads the immediate
                 // 0xC0000210, the "Internal error #4" the dumper dies with. No syscall
                 // returns that status, so it is Theia's own check; several of these are

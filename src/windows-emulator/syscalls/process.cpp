@@ -13,6 +13,14 @@ namespace sogen
                                                   const uint64_t process_information, const uint32_t process_information_length,
                                                   const emulator_object<uint32_t> return_length)
         {
+            if (getenv("SOGEN_QVM_DEBUG"))
+            {
+                c.win_emu.log.print(color::cyan, "[QIP] h=0x%" PRIx64 " cur=%d parent=%d class=%u len=%u\n", process_handle.bits,
+                                    c.proc.is_current_process_handle(process_handle) ? 1 : 0,
+                                    process_handle == REMOTE_PARENT_PROCESS_HANDLE ? 1 : 0,
+                                    static_cast<unsigned>(info_class), static_cast<unsigned>(process_information_length));
+            }
+
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 // A dumper reads its target's PEB to locate the image base, so the parent handle
