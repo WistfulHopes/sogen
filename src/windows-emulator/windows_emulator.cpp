@@ -1421,6 +1421,32 @@ namespace sogen
                     }
                 });
 
+                // 0928800 is Theia's thunk for error 0xE0670102: it takes three context
+                // arguments, decrypts a target with ROL64(stored ^ K, 7) + ADDEND, and calls it
+                // with the code in ecx. 38 static call sites use it, so the code is generic --
+                // an assertion helper rather than one named check -- and the only way to learn
+                // which use fired is the return address.
+                //
+                // This also decides where the code enters on the path actually taken. That path
+                // reaches the abort helper through the flattened VM at 014605E2, loading rcx from
+                // VM slot 0x1F8, so the value is already in the VM by then. If this hook fires,
+                // the thunk is the origin and its caller is the failing check; if it stays quiet,
+                // the code entered the VM by some other route and the 38 static sites are all
+                // irrelevant to us.
+                this->emu().hook_memory_execution(
+                    mod.image_base + 0x928800, [this, base = mod.image_base](cpu_interface&, const uint64_t) {
+                        const auto rsp = this->emu().reg<uint64_t>(x86_register::rsp);
+                        uint64_t ret = 0;
+                        this->memory.try_read_memory(rsp, &ret, sizeof(ret));
+
+                        this->log.print(color::red,
+                                        "[E0670102] thunk entered from +0x%" PRIx64 "  a1=0x%" PRIx64 " a2=0x%" PRIx64
+                                        " a3=0x%" PRIx64 "\n",
+                                        ret - base, this->emu().reg<uint64_t>(x86_register::rcx),
+                                        this->emu().reg<uint64_t>(x86_register::rdx),
+                                        this->emu().reg<uint64_t>(x86_register::r8));
+                    });
+
                 // Theia's abort helper, and the only datum in the whole crash report that is
                 // not a literal. 09A6DD0 is:
                 //   movsxd rcx, ecx            ; ecx is an integer reason code
