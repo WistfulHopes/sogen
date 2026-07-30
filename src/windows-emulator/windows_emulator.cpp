@@ -506,6 +506,49 @@ namespace sogen
                 return false;
             }
 
+            // SOGEN_DEFER_TID=<tid>[,<count>] -- skip the first <count> scheduling opportunities for
+            // one thread. Theia's abort is scheduling-sensitive: two runs that differ only in whether
+            // tid 12 reaches its NtWaitForSingleObject before or after a neighbouring thread diverge
+            // by ~29000 lines, the later ordering getting much further. This makes that ordering
+            // reproducible instead of appearing in roughly one run in eight.
+            //
+            // Forced switches are exempt: those are explicit hand-offs, not the round-robin, and
+            // refusing one would change semantics rather than ordering.
+            if (!force)
+            {
+                static const auto defer = [] {
+                    std::pair<uint32_t, uint32_t> spec{0, 0};
+                    if (const auto* env = getenv("SOGEN_DEFER_TID"))
+                    {
+                        spec.first = static_cast<uint32_t>(strtoul(env, nullptr, 0));
+                        if (const auto* comma = strchr(env, ','))
+                        {
+                            spec.second = static_cast<uint32_t>(strtoul(comma + 1, nullptr, 0));
+                        }
+                        if (spec.second == 0)
+                        {
+                            spec.second = 1;
+                        }
+                    }
+                    return spec;
+                }();
+
+                if (defer.first != 0 && thread.id == defer.first)
+                {
+                    // Keyed on the emulator, not a bare static: the parent and child run in one
+                    // process, so a plain static would let one consume the other's deferrals.
+                    static std::map<const windows_emulator*, std::map<uint32_t, uint32_t>> skipped;
+                    auto& count = skipped[&win_emu][thread.id];
+                    if (count < defer.second)
+                    {
+                        ++count;
+                        win_emu.log.print(color::cyan, "[DEFER] tid %u skipped (%u/%u)\n", thread.id, count,
+                                          defer.second);
+                        return false;
+                    }
+                }
+            }
+
             // A thread that is loaded on another vCPU can only run there.
             if (auto* running_on = find_vcpu_running_thread(win_emu, thread); running_on && running_on != &vcpu)
             {
