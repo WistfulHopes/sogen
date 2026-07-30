@@ -1527,6 +1527,30 @@ namespace sogen
                         //   call   09A6DD0
                         // so each abort site is identified by (code, file, line), not the code
                         // alone -- which is why 0xE0670102 having 38 call sites was not a dead end.
+                        // The abort is reached through the flattened VM: 014605E2 loads rcx from
+                        // VM context slot 0x1F8 after a `sub rsp,0x30`. Static tracing to whatever
+                        // wrote that slot is closed (both tripwire-verdict consumers are flattened),
+                        // and a write watchpoint is unavailable because WHP registers write hooks
+                        // into a map it never iterates. The frame itself is still readable here, and
+                        // the operands of the comparison that failed are plausibly in adjacent
+                        // slots, so dump it rather than infer.
+                        if (getenv("SOGEN_ABORT_FRAME"))
+                        {
+                            const auto frame = this->emu().reg<uint64_t>(x86_register::rsp) + 8;
+                            for (uint64_t off = 0; off < 0x228; off += 8)
+                            {
+                                uint64_t v = 0;
+                                if (!this->memory.try_read_memory(frame + off, &v, sizeof(v)) || v == 0)
+                                {
+                                    continue;
+                                }
+
+                                const auto* m = this->mod_manager.find_by_address(v);
+                                this->log.print(color::cyan, "[FRAME] +0x%03" PRIx64 " = 0x%016" PRIx64 "%s%s%s\n", off, v,
+                                                m ? "  (" : "", m ? m->name.c_str() : "", m ? ")" : "");
+                            }
+                        }
+
                         const auto code = this->emu().reg<uint32_t>(x86_register::ecx);
                         this->log.print(color::red,
                                         "[ABORTCODE] code=0x%X file=0x%" PRIx64 " line=%u  from +0x%" PRIx64 "\n", code,
