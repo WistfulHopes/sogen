@@ -144,7 +144,8 @@ namespace sogen
         NTSTATUS handle_NtGetNlsSectionPtr(const syscall_context& c, ULONG section_type, ULONG section_data,
                                            emulator_pointer /*context_data*/, emulator_object<uint64_t> section_pointer,
                                            emulator_object<ULONG> section_size);
-        NTSTATUS handle_NtGetMUIRegistryInfo();
+        NTSTATUS handle_NtGetMUIRegistryInfo(const syscall_context& c, ULONG flags, emulator_object<ULONG> data_size,
+                                             emulator_pointer data);
         NTSTATUS handle_NtIsUILanguageComitted();
         uint64_t handle_NtUserActivateKeyboardLayout(const syscall_context& c, uint64_t keyboard_layout, uint32_t flags);
         uint64_t handle_NtUserGetKeyboardLayout(const syscall_context& c, uint32_t thread_id);
@@ -937,7 +938,7 @@ namespace sogen
 
         NTSTATUS handle_NtManageHotPatch()
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtApphelpCacheControl(const syscall_context& /*c*/, const uint32_t service_class,

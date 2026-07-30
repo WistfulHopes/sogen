@@ -495,9 +495,19 @@ namespace sogen
             case SystemProcessInformation:
                 return handle_system_process_information(c, system_information, system_information_length, return_length);
 
-            case SystemFlushInformation:
+            case SystemHypervisorSharedPageInformation: // anti-VM probe
+            case SystemFlushInformation: {
+                if (return_length)
+                    return_length.write(system_information_length);
+                if (system_information && system_information_length)
+                {
+                    const std::vector<std::byte> zero(system_information_length, std::byte{0});
+                    c.emu.write_memory(system_information, zero.data(), zero.size());
+                }
+                return STATUS_SUCCESS;
+            }
+
             case SystemCodeIntegrityPolicyInformation:
-            case SystemHypervisorSharedPageInformation:
             case SystemFeatureConfigurationInformation:
             case SystemSupportedProcessorArchitectures2:
             case SystemFeatureConfigurationSectionInformation:
@@ -861,8 +871,7 @@ namespace sogen
                     });
 
             default:
-                c.win_emu.log.error("Unsupported system info class: 0x%X\n", info_class);
-                c.emu.stop();
+                c.win_emu.log.warn("Unsupported system info class: 0x%X (returning NOT_SUPPORTED, continuing)\n", info_class);
                 return STATUS_NOT_SUPPORTED;
             }
         }

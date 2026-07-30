@@ -491,6 +491,40 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == ThreadNameInformation)
+            {
+                const auto& name = thread->name;
+                const auto name_bytes = static_cast<uint32_t>(name.size() * sizeof(char16_t));
+                const auto required =
+                    static_cast<uint32_t>(sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>) + name_bytes);
+
+                if (return_length)
+                {
+                    return_length.write(required);
+                }
+
+                if (thread_information_length < required)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                const auto buffer_addr = thread_information + sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>);
+
+                const emulator_object<THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>> info{c.emu, thread_information};
+                info.access([&](THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>& tni) {
+                    tni.ThreadName.Length = static_cast<USHORT>(name_bytes);
+                    tni.ThreadName.MaximumLength = static_cast<USHORT>(name_bytes);
+                    tni.ThreadName.Buffer = name_bytes ? buffer_addr : 0;
+                });
+
+                if (name_bytes)
+                {
+                    c.emu.write_memory(buffer_addr, name.data(), name_bytes);
+                }
+
+                return STATUS_SUCCESS;
+            }
+
             c.win_emu.log.error("Unsupported thread query info class: 0x%X\n", info_class);
             c.emu.stop();
 
