@@ -1471,6 +1471,51 @@ namespace sogen
                     }
                 });
 
+                // SOGEN_STRSEED=1 -- capture Theia's string-decrypt seeds at runtime.
+                //
+                // theia_strings16.py recovers only 5 of the 49 `rol r64,5` sites, because the other
+                // 44 take their seed from a register rather than an inline movabs, and no static
+                // window can reach them. The seed is live in a register when the loop runs, so
+                // logging the general-purpose registers at each site is enough to reconstruct the
+                // rest offline: one register holds the key, another the ciphertext pointer, and the
+                // ASCII-in-UTF-16 filter is strong enough to resolve which is which.
+                //
+                // Worth doing now because the failing assertion identifies its source file by a
+                // 64-bit hash (0x8F0A40B613398CAB), and the abort frame carries the FNV-1a-64 basis
+                // high dword as a remnant. If Theia's strings include source filenames, hashing them
+                // is a direct way to name that file -- which static tracing to the check cannot do.
+                if (getenv("SOGEN_STRSEED"))
+                {
+                    static constexpr uint64_t rol_sites[] = {
+                        0x8CFA24, 0x8FD884, 0x8FD8D4, 0x918024, 0x94AAF4,
+                    };
+
+                    for (const auto rva : rol_sites)
+                    {
+                        this->emu().hook_memory_execution(
+                            mod.image_base + rva, [this, rva](cpu_interface&, const uint64_t) {
+                                static std::set<uint64_t> seen;
+                                if (!seen.insert(rva).second)
+                                {
+                                    return;
+                                }
+
+                                this->log.print(color::pink,
+                                                "[STRSEED] +0x%" PRIx64 " rax=0x%" PRIx64 " rcx=0x%" PRIx64 " rdx=0x%" PRIx64
+                                                " rbx=0x%" PRIx64 " rsi=0x%" PRIx64 " rdi=0x%" PRIx64 " r8=0x%" PRIx64
+                                                " r9=0x%" PRIx64 "\n",
+                                                rva, this->emu().reg<uint64_t>(x86_register::rax),
+                                                this->emu().reg<uint64_t>(x86_register::rcx),
+                                                this->emu().reg<uint64_t>(x86_register::rdx),
+                                                this->emu().reg<uint64_t>(x86_register::rbx),
+                                                this->emu().reg<uint64_t>(x86_register::rsi),
+                                                this->emu().reg<uint64_t>(x86_register::rdi),
+                                                this->emu().reg<uint64_t>(x86_register::r8),
+                                                this->emu().reg<uint64_t>(x86_register::r9));
+                            });
+                    }
+                }
+
                 // 0928800 is Theia's thunk for error 0xE0670102: it takes three context
                 // arguments, decrypts a target with ROL64(stored ^ K, 7) + ADDEND, and calls it
                 // with the code in ecx. 38 static call sites use it, so the code is generic --
