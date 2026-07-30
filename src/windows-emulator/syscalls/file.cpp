@@ -506,6 +506,23 @@ namespace sogen
 
                 c.emu.write_memory(object.value() + offsetof(T, FileName), file_name.data(), info.FileNameLength);
 
+                // SOGEN_ENUM_DEBUG=1 -- report what is actually handed back per entry. Theia
+                // enumerates the code-signing catalog directory twice and then issues 4747 opens
+                // with a zero-length ObjectName, one per catalog file, so it obtains the right
+                // entry count but no usable names. Reading this path's source has produced three
+                // wrong conclusions already; log the bytes instead of inferring from them.
+                {
+                    static const bool enum_debug = getenv("SOGEN_ENUM_DEBUG") != nullptr;
+                    if (enum_debug && current_index < 4)
+                    {
+                        c.win_emu.log.print(color::cyan,
+                                            "[ENUM] [%zu] name='%s' name_len=%u attr=0x%X size=%llu required=%zu\n",
+                                            current_index, u16_to_u8(file_name).c_str(), info.FileNameLength,
+                                            static_cast<unsigned>(info.FileAttributes),
+                                            static_cast<unsigned long long>(current_file.file_size), required_size);
+                    }
+                }
+
                 ++current_index;
                 current_offset = end_offset;
             } while ((query_flags & SL_RETURN_SINGLE_ENTRY) == 0 && current_index < enum_state.files.size());
