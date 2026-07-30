@@ -1471,6 +1471,63 @@ namespace sogen
                     }
                 });
 
+                // SOGEN_STRSEED=1 -- capture Theia's string-decrypt seeds at runtime.
+                //
+                // theia_strings16.py recovers only 5 of the 49 `rol r64,5` sites, because the other
+                // 44 take their seed from a register rather than an inline movabs, and no static
+                // window can reach them. The seed is live in a register when the loop runs, so
+                // logging the general-purpose registers at each site is enough to reconstruct the
+                // rest offline: one register holds the key, another the ciphertext pointer, and the
+                // ASCII-in-UTF-16 filter is strong enough to resolve which is which.
+                //
+                // Worth doing now because the failing assertion identifies its source file by a
+                // 64-bit hash (0x8F0A40B613398CAB), and the abort frame carries the FNV-1a-64 basis
+                // high dword as a remnant. If Theia's strings include source filenames, hashing them
+                // is a direct way to name that file -- which static tracing to the check cannot do.
+                if (getenv("SOGEN_STRSEED"))
+                {
+                    // All 49 `rol r64,5` sites. The control on five known-answer sites confirmed
+                    // the method: site 08FD884 handed back r9 = base+0x41FF10, the CatRoot path's
+                    // ciphertext, and 08FD8D4 handed back base+0x8759BC, the *.cat ciphertext, both
+                    // matching what theia_strings16.py recovered statically. The holding register
+                    // differs per site -- 0918024 carried its pointer in rdx -- which is why every
+                    // GPR is logged rather than a guessed one.
+                    static constexpr uint64_t rol_sites[] = {
+                        0x8CFA24, 0x8F2B54, 0x8FD714, 0x8FD884, 0x8FD8D4, 0x8FE972, 0x8FE9D2, 0x918024,
+                        0x94AAF4, 0x148FCCD, 0x14FF4AB, 0x1536301, 0x17253ED, 0x18E1924, 0x1913C12, 0x1B9B97B,
+                        0x1CE062A, 0x1DF11A6, 0x1E4DFA3, 0x1F84DAB, 0x20002C2, 0x215034A, 0x224E4DD, 0x2613708,
+                        0x264E491, 0x283B052, 0x2B25352, 0x2C30056, 0x2E67188, 0x315DFF9, 0x3528A12, 0x35E336C,
+                        0x36768AD, 0x36F361B, 0x376AC05, 0x3811285, 0x386D807, 0x386E959, 0x38A7C1E, 0x38CC173,
+                        0x38E107A, 0x39172F4, 0x3AAF013, 0x3AFB881, 0x3BE5CEA, 0x3C087BD, 0x3D177E0, 0x3D2945A,
+                        0x3D2EBAD,
+                    };
+
+                    for (const auto rva : rol_sites)
+                    {
+                        this->emu().hook_memory_execution(
+                            mod.image_base + rva, [this, rva](cpu_interface&, const uint64_t) {
+                                static std::set<uint64_t> seen;
+                                if (!seen.insert(rva).second)
+                                {
+                                    return;
+                                }
+
+                                this->log.print(color::pink,
+                                                "[STRSEED] +0x%" PRIx64 " rax=0x%" PRIx64 " rcx=0x%" PRIx64 " rdx=0x%" PRIx64
+                                                " rbx=0x%" PRIx64 " rsi=0x%" PRIx64 " rdi=0x%" PRIx64 " r8=0x%" PRIx64
+                                                " r9=0x%" PRIx64 "\n",
+                                                rva, this->emu().reg<uint64_t>(x86_register::rax),
+                                                this->emu().reg<uint64_t>(x86_register::rcx),
+                                                this->emu().reg<uint64_t>(x86_register::rdx),
+                                                this->emu().reg<uint64_t>(x86_register::rbx),
+                                                this->emu().reg<uint64_t>(x86_register::rsi),
+                                                this->emu().reg<uint64_t>(x86_register::rdi),
+                                                this->emu().reg<uint64_t>(x86_register::r8),
+                                                this->emu().reg<uint64_t>(x86_register::r9));
+                            });
+                    }
+                }
+
                 // 0928800 is Theia's thunk for error 0xE0670102: it takes three context
                 // arguments, decrypts a target with ROL64(stored ^ K, 7) + ADDEND, and calls it
                 // with the code in ecx. 38 static call sites use it, so the code is generic --
@@ -1527,6 +1584,30 @@ namespace sogen
                         //   call   09A6DD0
                         // so each abort site is identified by (code, file, line), not the code
                         // alone -- which is why 0xE0670102 having 38 call sites was not a dead end.
+                        // The abort is reached through the flattened VM: 014605E2 loads rcx from
+                        // VM context slot 0x1F8 after a `sub rsp,0x30`. Static tracing to whatever
+                        // wrote that slot is closed (both tripwire-verdict consumers are flattened),
+                        // and a write watchpoint is unavailable because WHP registers write hooks
+                        // into a map it never iterates. The frame itself is still readable here, and
+                        // the operands of the comparison that failed are plausibly in adjacent
+                        // slots, so dump it rather than infer.
+                        if (getenv("SOGEN_ABORT_FRAME"))
+                        {
+                            const auto frame = this->emu().reg<uint64_t>(x86_register::rsp) + 8;
+                            for (uint64_t off = 0; off < 0x228; off += 8)
+                            {
+                                uint64_t v = 0;
+                                if (!this->memory.try_read_memory(frame + off, &v, sizeof(v)) || v == 0)
+                                {
+                                    continue;
+                                }
+
+                                const auto* m = this->mod_manager.find_by_address(v);
+                                this->log.print(color::cyan, "[FRAME] +0x%03" PRIx64 " = 0x%016" PRIx64 "%s%s%s\n", off, v,
+                                                m ? "  (" : "", m ? m->name.c_str() : "", m ? ")" : "");
+                            }
+                        }
+
                         const auto code = this->emu().reg<uint32_t>(x86_register::ecx);
                         this->log.print(color::red,
                                         "[ABORTCODE] code=0x%X file=0x%" PRIx64 " line=%u  from +0x%" PRIx64 "\n", code,
