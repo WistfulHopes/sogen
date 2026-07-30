@@ -1863,6 +1863,29 @@ namespace sogen
                 }
             }
 
+            if ((create_options & FILE_OPEN_BY_FILE_ID) && attributes.RootDirectory)
+            {
+                uint64_t target_id = 0;
+                for (size_t i = 0; i < filename.size() && i < sizeof(target_id) / sizeof(char16_t); ++i)
+                {
+                    target_id |= static_cast<uint64_t>(static_cast<uint16_t>(filename[i])) << (i * 16);
+                }
+
+                if (auto* rf = c.proc.files.get(make_handle(attributes.RootDirectory)); rf && target_id != 0)
+                {
+                    const auto entries = scan_directory(c.win_emu.file_sys, rf->name, u"*", c.win_emu.uses_relative_time());
+                    for (const auto& e : entries)
+                    {
+                        const auto leaf = e.file_path.u16string();
+                        if (e.file_id == target_id && leaf != u"." && leaf != u"..")
+                        {
+                            filename = leaf;
+                            break;
+                        }
+                    }
+                }
+            }
+
             if (attributes.RootDirectory || filename.find(u"EasyAntiCheat") != std::u16string::npos ||
                 filename.find(u"Device") != std::u16string::npos)
             {
