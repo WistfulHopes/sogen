@@ -513,6 +513,23 @@ namespace sogen
                 // wrong conclusions already; log the bytes instead of inferring from them.
                 {
                     static const bool enum_debug = getenv("SOGEN_ENUM_DEBUG") != nullptr;
+                    if (enum_debug && current_index == 0)
+                    {
+                        std::array<uint8_t, 64> raw{};
+                        if (c.win_emu.memory.try_read_memory(object.value(), raw.data(), raw.size()))
+                        {
+                            std::string hex{};
+                            for (size_t i = 0; i < raw.size(); ++i)
+                            {
+                                char b[4];
+                                snprintf(b, sizeof(b), "%02x", raw[i]);
+                                hex += b;
+                                hex += ((i % 8) == 7) ? " | " : " ";
+                            }
+                            c.win_emu.log.print(color::cyan, "[ENUMRAW] sizeof(T)=%zu offsetof(FileName)=%zu\n[ENUMRAW] %s\n",
+                                                sizeof(T), offsetof(T, FileName), hex.c_str());
+                        }
+                    }
                     if (enum_debug && current_index < 4)
                     {
                         c.win_emu.log.print(color::cyan,
@@ -551,6 +568,18 @@ namespace sogen
             if (!f || !f->is_directory())
             {
                 return STATUS_INVALID_HANDLE;
+            }
+
+            // Which info class is requested decides which structure handle_file_enumeration
+            // instantiates, and therefore which layout has to match Windows'. Theia reads the
+            // filenames back out of these records, so a wrong offsetof(FileName) would have it
+            // read zeros -- which is what its zero-length opens look like.
+            static const bool enum_debug = getenv("SOGEN_ENUM_DEBUG") != nullptr;
+            if (enum_debug)
+            {
+                c.win_emu.log.print(color::cyan, "[ENUMCLASS] class=%u len=%u flags=0x%X dir='%s'\n",
+                                    static_cast<unsigned>(info_class), length, static_cast<unsigned>(query_flags),
+                                    u16_to_u8(f->name).c_str());
             }
 
             if (info_class == FileDirectoryInformation)
