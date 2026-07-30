@@ -1486,8 +1486,20 @@ namespace sogen
                 // is a direct way to name that file -- which static tracing to the check cannot do.
                 if (getenv("SOGEN_STRSEED"))
                 {
+                    // All 49 `rol r64,5` sites. The control on five known-answer sites confirmed
+                    // the method: site 08FD884 handed back r9 = base+0x41FF10, the CatRoot path's
+                    // ciphertext, and 08FD8D4 handed back base+0x8759BC, the *.cat ciphertext, both
+                    // matching what theia_strings16.py recovered statically. The holding register
+                    // differs per site -- 0918024 carried its pointer in rdx -- which is why every
+                    // GPR is logged rather than a guessed one.
                     static constexpr uint64_t rol_sites[] = {
-                        0x8CFA24, 0x8FD884, 0x8FD8D4, 0x918024, 0x94AAF4,
+                        0x8CFA24, 0x8F2B54, 0x8FD714, 0x8FD884, 0x8FD8D4, 0x8FE972, 0x8FE9D2, 0x918024,
+                        0x94AAF4, 0x148FCCD, 0x14FF4AB, 0x1536301, 0x17253ED, 0x18E1924, 0x1913C12, 0x1B9B97B,
+                        0x1CE062A, 0x1DF11A6, 0x1E4DFA3, 0x1F84DAB, 0x20002C2, 0x215034A, 0x224E4DD, 0x2613708,
+                        0x264E491, 0x283B052, 0x2B25352, 0x2C30056, 0x2E67188, 0x315DFF9, 0x3528A12, 0x35E336C,
+                        0x36768AD, 0x36F361B, 0x376AC05, 0x3811285, 0x386D807, 0x386E959, 0x38A7C1E, 0x38CC173,
+                        0x38E107A, 0x39172F4, 0x3AAF013, 0x3AFB881, 0x3BE5CEA, 0x3C087BD, 0x3D177E0, 0x3D2945A,
+                        0x3D2EBAD,
                     };
 
                     for (const auto rva : rol_sites)
