@@ -636,6 +636,8 @@ namespace sogen
         LARGE_INTEGER creation_time{};
         LARGE_INTEGER last_access_time{};
         LARGE_INTEGER last_write_time{};
+        uint64_t allocation_size{};
+        uint64_t file_id{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -645,6 +647,8 @@ namespace sogen
             buffer.write(this->creation_time);
             buffer.write(this->last_access_time);
             buffer.write(this->last_write_time);
+            buffer.write(this->allocation_size);
+            buffer.write(this->file_id);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -655,6 +659,8 @@ namespace sogen
             buffer.read(this->creation_time);
             buffer.read(this->last_access_time);
             buffer.read(this->last_write_time);
+            buffer.read(this->allocation_size);
+            buffer.read(this->file_id);
         }
     };
 

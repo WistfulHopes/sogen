@@ -317,27 +317,25 @@ namespace sogen
                 // ExtensionImageSize, ULONG Flags, ULONG Reserved[4] -- 0x18 bytes, which is
                 // the size callers ask for. Images built without a hotpatch extension have
                 // none, so an all-zero answer is the correct one rather than a failure.
-                const auto* mod = c.win_emu.mod_manager.find_by_address(base_address);
+                constexpr uint64_t struct_size = 24;
+                if (return_length)
+                {
+                    return_length.write(struct_size);
+                }
+                if (memory_information_length < struct_size)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                const auto* mod = base_address == 0 ? c.win_emu.mod_manager.executable
+                                                    : c.win_emu.mod_manager.find_by_address(base_address);
                 if (!mod)
                 {
                     return STATUS_INVALID_ADDRESS;
                 }
 
-                constexpr uint32_t extension_info_size = 0x18;
-
-                if (return_length)
-                {
-                    return_length.write(extension_info_size);
-                }
-
-                if (memory_information_length < extension_info_size)
-                {
-                    return STATUS_BUFFER_OVERFLOW;
-                }
-
-                const std::array<uint8_t, extension_info_size> empty{};
+                const std::array<uint8_t, struct_size> empty{};
                 c.emu.write_memory(memory_information, empty.data(), empty.size());
-
                 return STATUS_SUCCESS;
             }
 
@@ -693,7 +691,12 @@ namespace sogen
 
             if (!potential_base)
             {
-                return STATUS_MEMORY_NOT_ALLOCATED;
+                c.win_emu.log.print(color::red,
+                                    "[ALLOCFAIL] no free base for bytes=0x%" PRIx64 " align=0x%" PRIx64 " lo=0x%" PRIx64
+                                    " hi=0x%" PRIx64 "\n",
+                                    allocation_bytes, address_requirements.alignment, address_requirements.lowest_address,
+                                    address_requirements.highest_address);
+                return STATUS_NO_MEMORY;
             }
 
             base_address.write(potential_base);
@@ -714,9 +717,28 @@ namespace sogen
 
             c.win_emu.callbacks.on_memory_allocate(potential_base, allocation_bytes, *protection, false);
 
-            return c.win_emu.memory.allocate_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection, !commit)
-                       ? STATUS_SUCCESS
-                       : STATUS_MEMORY_NOT_ALLOCATED;
+            if (c.win_emu.memory.allocate_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection, !commit))
+            {
+                return STATUS_SUCCESS;
+            }
+
+            // Theia's dumper dies with a generic HRESULT_FROM_WIN32 rather than a status, so a
+            // failed allocation here is invisible in the error it reports. Log the request.
+            const auto failed_region = c.win_emu.memory.get_region_info(potential_base);
+
+            c.win_emu.log.print(color::red,
+                                "[ALLOCFAIL] base=0x%" PRIx64 " requested=0x%" PRIx64 " bytes=0x%" PRIx64
+                                " prot=0x%X type=0x%X occupied=%d kind=%d\n",
+                                potential_base, requested_base, allocation_bytes, page_protection, allocation_type,
+                                failed_region.is_reserved ? 1 : 0, static_cast<int>(failed_region.kind));
+
+            // Windows distinguishes these, and Theia is known to branch on exact statuses
+            // elsewhere. Committing into an address already spoken for -- most often a mapped
+            // image, as when something asks for a page inside user32's view -- is
+            // STATUS_CONFLICTING_ADDRESSES; genuinely running out of room is STATUS_NO_MEMORY.
+            // STATUS_MEMORY_NOT_ALLOCATED belongs to the free path and is not returned here by
+            // the real kernel at all.
+            return failed_region.is_reserved ? STATUS_CONFLICTING_ADDRESSES : STATUS_NO_MEMORY;
         }
 
         NTSTATUS handle_NtAllocateVirtualMemory(const syscall_context& c, const handle process_handle,

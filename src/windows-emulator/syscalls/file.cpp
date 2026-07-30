@@ -384,6 +384,17 @@ namespace sogen
                     entry.creation_time = get_file_time(deterministic_time, file_stat.st_ctimespec);
                     entry.last_access_time = get_file_time(deterministic_time, file_stat.st_atimespec);
                     entry.last_write_time = get_file_time(deterministic_time, file_stat.st_mtimespec);
+
+                    // AllocationSize is the space actually reserved on disk, so it is the file size
+                    // rounded up to a cluster and is never zero for a non-empty file. Leaving it zero
+                    // is visibly wrong to anything that inspects it.
+                    constexpr uint64_t cluster_size = 4096;
+                    entry.allocation_size = is_directory ? 0 : align_up(entry.file_size, cluster_size);
+
+                    // The ID-bearing information classes exist to hand back a value that is unique
+                    // per file on a volume; returning zero for every entry makes them useless to any
+                    // caller that keys on it. The host inode is the natural source.
+                    entry.file_id = file_stat.st_ino;
                 }
 
                 return entry;
@@ -500,11 +511,53 @@ namespace sogen
                 info.FileAttributes = current_file.is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
                 info.FileNameLength = static_cast<ULONG>(file_name.size() * 2);
                 info.EndOfFile.QuadPart = current_file.file_size;
+                info.AllocationSize.QuadPart = static_cast<int64_t>(current_file.allocation_size);
+
+                // Only the FileId* classes carry an identifier, and Theia asks for class 38
+                // (FileIdFullDirectoryInformation) precisely to get one.
+                if constexpr (requires { info.FileId; })
+                {
+                    info.FileId.QuadPart = static_cast<int64_t>(current_file.file_id);
+                }
 
                 object.set_address(file_information + new_offset);
                 object.write(info);
 
                 c.emu.write_memory(object.value() + offsetof(T, FileName), file_name.data(), info.FileNameLength);
+
+                // SOGEN_ENUM_DEBUG=1 -- report what is actually handed back per entry. Theia
+                // enumerates the code-signing catalog directory twice and then issues 4747 opens
+                // with a zero-length ObjectName, one per catalog file, so it obtains the right
+                // entry count but no usable names. Reading this path's source has produced three
+                // wrong conclusions already; log the bytes instead of inferring from them.
+                {
+                    static const bool enum_debug = getenv("SOGEN_ENUM_DEBUG") != nullptr;
+                    if (enum_debug && current_index == 0)
+                    {
+                        std::array<uint8_t, 64> raw{};
+                        if (c.win_emu.memory.try_read_memory(object.value(), raw.data(), raw.size()))
+                        {
+                            std::string hex{};
+                            for (size_t i = 0; i < raw.size(); ++i)
+                            {
+                                char b[4];
+                                snprintf(b, sizeof(b), "%02x", raw[i]);
+                                hex += b;
+                                hex += ((i % 8) == 7) ? " | " : " ";
+                            }
+                            c.win_emu.log.print(color::cyan, "[ENUMRAW] sizeof(T)=%zu offsetof(FileName)=%zu\n[ENUMRAW] %s\n",
+                                                sizeof(T), offsetof(T, FileName), hex.c_str());
+                        }
+                    }
+                    if (enum_debug && current_index < 4)
+                    {
+                        c.win_emu.log.print(color::cyan,
+                                            "[ENUM] [%zu] name='%s' name_len=%u attr=0x%X size=%llu required=%zu\n",
+                                            current_index, u16_to_u8(file_name).c_str(), info.FileNameLength,
+                                            static_cast<unsigned>(info.FileAttributes),
+                                            static_cast<unsigned long long>(current_file.file_size), required_size);
+                    }
+                }
 
                 ++current_index;
                 current_offset = end_offset;
@@ -534,6 +587,18 @@ namespace sogen
             if (!f || !f->is_directory())
             {
                 return STATUS_INVALID_HANDLE;
+            }
+
+            // Which info class is requested decides which structure handle_file_enumeration
+            // instantiates, and therefore which layout has to match Windows'. Theia reads the
+            // filenames back out of these records, so a wrong offsetof(FileName) would have it
+            // read zeros -- which is what its zero-length opens look like.
+            static const bool enum_debug = getenv("SOGEN_ENUM_DEBUG") != nullptr;
+            if (enum_debug)
+            {
+                c.win_emu.log.print(color::cyan, "[ENUMCLASS] class=%u len=%u flags=0x%X dir='%s'\n",
+                                    static_cast<unsigned>(info_class), length, static_cast<unsigned>(query_flags),
+                                    u16_to_u8(f->name).c_str());
             }
 
             if (info_class == FileDirectoryInformation)

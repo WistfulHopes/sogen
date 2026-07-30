@@ -506,6 +506,49 @@ namespace sogen
                 return false;
             }
 
+            // SOGEN_DEFER_TID=<tid>[,<count>] -- skip the first <count> scheduling opportunities for
+            // one thread. Theia's abort is scheduling-sensitive: two runs that differ only in whether
+            // tid 12 reaches its NtWaitForSingleObject before or after a neighbouring thread diverge
+            // by ~29000 lines, the later ordering getting much further. This makes that ordering
+            // reproducible instead of appearing in roughly one run in eight.
+            //
+            // Forced switches are exempt: those are explicit hand-offs, not the round-robin, and
+            // refusing one would change semantics rather than ordering.
+            if (!force)
+            {
+                static const auto defer = [] {
+                    std::pair<uint32_t, uint32_t> spec{0, 0};
+                    if (const auto* env = getenv("SOGEN_DEFER_TID"))
+                    {
+                        spec.first = static_cast<uint32_t>(strtoul(env, nullptr, 0));
+                        if (const auto* comma = strchr(env, ','))
+                        {
+                            spec.second = static_cast<uint32_t>(strtoul(comma + 1, nullptr, 0));
+                        }
+                        if (spec.second == 0)
+                        {
+                            spec.second = 1;
+                        }
+                    }
+                    return spec;
+                }();
+
+                if (defer.first != 0 && thread.id == defer.first)
+                {
+                    // Keyed on the emulator, not a bare static: the parent and child run in one
+                    // process, so a plain static would let one consume the other's deferrals.
+                    static std::map<const windows_emulator*, std::map<uint32_t, uint32_t>> skipped;
+                    auto& count = skipped[&win_emu][thread.id];
+                    if (count < defer.second)
+                    {
+                        ++count;
+                        win_emu.log.print(color::cyan, "[DEFER] tid %u skipped (%u/%u)\n", thread.id, count,
+                                          defer.second);
+                        return false;
+                    }
+                }
+            }
+
             // A thread that is loaded on another vCPU can only run there.
             if (auto* running_on = find_vcpu_running_thread(win_emu, thread); running_on && running_on != &vcpu)
             {
@@ -1358,7 +1401,14 @@ namespace sogen
             //
             // Init decrypts pages just to run (the game exe's .text ships as ciphertext), so
             // this fires long before any pak is opened -- it does not need the game to boot.
-            if (mod.name == "runtime.dll")
+            // SOGEN_NO_THEIA_HOOKS=1 -- install none of the runtime.dll instrumentation. Every
+            // run in this project has had hooks present, so there is no baseline without them, and
+            // Theia's integrity checker is documented to scan its own code for exactly the 5-byte
+            // patches an int3 execution hook installs. --whp-exec-hook auto cannot serve as the
+            // control: it dies at ~1083 lines rather than ~87900, so it perturbs far more than
+            // whether code is patched. This gate keeps the backend identical and changes only
+            // whether anything is written into Theia's code.
+            if (mod.name == "runtime.dll" && !getenv("SOGEN_NO_THEIA_HOOKS"))
             {
                 struct site
                 {
@@ -1374,11 +1424,199 @@ namespace sogen
                     {0x898384, "CONTROL tripwire (known to execute)"},
                 };
 
+                // Theia's fatal-exception reporter. Two of its SEH scope-table filters
+                // (0972060, 0897920) are byte-identical and do only this:
+                //   mov rax,[rcx] / mov rdx,[rcx+8] / mov rcx,rax / xor r8d,r8d / xor r9d,r9d
+                //   call 08AB7C0 / int3
+                // The trailing int3 is unreachable-code padding, so the callee is noreturn: this
+                // address is reached only once Theia has judged an exception fatal, and it is
+                // handed the record describing it. Always armed -- it fires at most once, after
+                // the decision to die, so it cannot alter behaviour, and it replaces inferring a
+                // run's cause of death from whatever happened to be logged last.
+                this->emu().hook_memory_execution(mod.image_base + 0x8AB7C0, [this](cpu_interface&, const uint64_t) {
+                    const auto record = this->emu().reg<uint64_t>(x86_register::rcx);
+                    const auto context = this->emu().reg<uint64_t>(x86_register::rdx);
+
+                    struct
+                    {
+                        uint32_t code;
+                        uint32_t flags;
+                        uint64_t nested;
+                        uint64_t address;
+                        uint32_t parameter_count;
+                    } er{};
+
+                    if (!this->memory.try_read_memory(record, &er, sizeof(er)))
+                    {
+                        this->log.print(color::red, "[FATAL] reporter reached, record 0x%" PRIx64 " unreadable\n", record);
+                        return;
+                    }
+
+                    // CONTEXT.Rip sits at +0xF8 on x64.
+                    uint64_t rip = 0;
+                    this->memory.try_read_memory(context + 0xF8, &rip, sizeof(rip));
+
+                    this->log.print(color::red,
+                                    "[FATAL] Theia reports a fatal exception: code=0x%08X flags=0x%08X"
+                                    " at=0x%" PRIx64 " params=%u context_rip=0x%" PRIx64 "\n",
+                                    er.code, er.flags, er.address, er.parameter_count, rip);
+
+                    for (uint32_t i = 0; i < er.parameter_count && i < 15; ++i)
+                    {
+                        uint64_t p = 0;
+                        if (this->memory.try_read_memory(record + 0x20 + i * 8, &p, sizeof(p)))
+                        {
+                            this->log.print(color::red, "[FATAL]   info[%u] = 0x%" PRIx64 "\n", i, p);
+                        }
+                    }
+                });
+
+                // 0928800 is Theia's thunk for error 0xE0670102: it takes three context
+                // arguments, decrypts a target with ROL64(stored ^ K, 7) + ADDEND, and calls it
+                // with the code in ecx. 38 static call sites use it, so the code is generic --
+                // an assertion helper rather than one named check -- and the only way to learn
+                // which use fired is the return address.
+                //
+                // This also decides where the code enters on the path actually taken. That path
+                // reaches the abort helper through the flattened VM at 014605E2, loading rcx from
+                // VM slot 0x1F8, so the value is already in the VM by then. If this hook fires,
+                // the thunk is the origin and its caller is the failing check; if it stays quiet,
+                // the code entered the VM by some other route and the 38 static sites are all
+                // irrelevant to us.
+                this->emu().hook_memory_execution(
+                    mod.image_base + 0x928800, [this, base = mod.image_base](cpu_interface&, const uint64_t) {
+                        const auto rsp = this->emu().reg<uint64_t>(x86_register::rsp);
+                        uint64_t ret = 0;
+                        this->memory.try_read_memory(rsp, &ret, sizeof(ret));
+
+                        this->log.print(color::red,
+                                        "[E0670102] thunk entered from +0x%" PRIx64 "  a1=0x%" PRIx64 " a2=0x%" PRIx64
+                                        " a3=0x%" PRIx64 "\n",
+                                        ret - base, this->emu().reg<uint64_t>(x86_register::rcx),
+                                        this->emu().reg<uint64_t>(x86_register::rdx),
+                                        this->emu().reg<uint64_t>(x86_register::r8));
+                    });
+
+                // Theia's abort helper, and the only datum in the whole crash report that is
+                // not a literal. 09A6DD0 is:
+                //   movsxd rcx, ecx            ; ecx is an integer reason code
+                //   lea    rax, [rip-0x9a6dde] ; == the image base, passed as the "fault address"
+                //   call   08E9FE0 ; int3      ; noreturn
+                // and 08E9FE0 fabricates an EXCEPTION_RECORD whose ExceptionCode (0xC0000005) and
+                // ExceptionInformation[0] (8, execute) are hardcoded, with the address fields set
+                // from that image base. So the reported "execute fault at 0x106190000" is entirely
+                // template: the code, the operation and the address are all constants in Theia's
+                // own source. 08EFF00 then stamps the record with "PACKRDMP" and a timestamp
+                // before reporting, which is what routes it to the crash dumper.
+                //
+                // ecx is therefore the actual reason, and the return address names which of the
+                // ten-plus call sites decided to abort. Nothing else in the report distinguishes
+                // one failure from another, which is why the C0000210 and 0x80070000 constant
+                // hunts both came back empty with hooks proven to fire -- the code is a parameter,
+                // never a stored constant.
+                this->emu().hook_memory_execution(
+                    mod.image_base + 0x9A6DD0, [this, base = mod.image_base](cpu_interface&, const uint64_t) {
+                        const auto rsp = this->emu().reg<uint64_t>(x86_register::rsp);
+                        uint64_t ret = 0;
+                        this->memory.try_read_memory(rsp, &ret, sizeof(ret));
+
+                        // The argument list is an assertion macro. 08ED271 shows it plainly:
+                        //   movabs rdx, 0xA011646B214ED628   ; file identifier
+                        //   mov    r8d, 0x21F               ; 543 -- a source line number
+                        //   mov    ecx, 0xE0670101          ; the error code
+                        //   call   09A6DD0
+                        // so each abort site is identified by (code, file, line), not the code
+                        // alone -- which is why 0xE0670102 having 38 call sites was not a dead end.
+                        const auto code = this->emu().reg<uint32_t>(x86_register::ecx);
+                        this->log.print(color::red,
+                                        "[ABORTCODE] code=0x%X file=0x%" PRIx64 " line=%u  from +0x%" PRIx64 "\n", code,
+                                        this->emu().reg<uint64_t>(x86_register::rdx),
+                                        this->emu().reg<uint32_t>(x86_register::r8d), ret - base);
+                    });
+
+                // Which abort path reports. 08AB7C0 has eight callers, all shaped
+                // report(record_ptr, context_ptr, 0, 0) with the two pointers loaded from a
+                // struct rather than built from a live exception -- 08BD5F6 shows the logic
+                // plainly: `call rdx; test eax,eax; je report`. So a check returning zero
+                // reports a pre-built record, which is why the reported code, C0000005 with an
+                // execute parameter at the image base, looks like a placeholder: it is one.
+                // Naming the site that fires names the check that failed.
+                {
+                    static constexpr uint64_t report_sites[] = {
+                        0x897934, 0x897E28, 0x8BD5F6, 0x8ED28A, 0x8EFF1D, 0x8FC7FA, 0x972074, 0x98AB84,
+                    };
+
+                    for (const auto rva : report_sites)
+                    {
+                        this->emu().hook_memory_execution(
+                            mod.image_base + rva, [this, rva](cpu_interface&, const uint64_t) {
+                                this->log.print(color::red,
+                                                "[ABORT] report site +0x%" PRIx64 " rcx=0x%" PRIx64 " rdx=0x%" PRIx64
+                                                " rsi=0x%" PRIx64 "\n",
+                                                rva, this->emu().reg<uint64_t>(x86_register::rcx),
+                                                this->emu().reg<uint64_t>(x86_register::rdx),
+                                                this->emu().reg<uint64_t>(x86_register::rsi));
+                            });
+                    }
+                }
+
+                // Theia's tripwire verdict. RUNTIME_FUNCTION[427] at 08DB880 is 35 bytes:
+                //   mov qword [rbp-8], 0 / call 0898380 / mov rax, [rbp-8] / ret
+                // 0898380 is the tripwire (xor eax,eax; mov eax,[rax]; mov eax,0FFFh; syscall),
+                // and the single scope record guards exactly that call with filter 091C8D0 --
+                // the only filter used once in the whole binary. It trampolines to 01442BC8,
+                // which computes EstablisherFrame+0x28, the same slot as [rbp-8]. So the filter
+                // writes what it observed into the value the function returns, and Theia compares
+                // that against what Windows would produce. Reading it at 08DB897 gives the
+                // verdict directly; no constant hunt can, because it is computed from a live
+                // exception and never stored.
+                {
+                    this->emu().hook_memory_execution(mod.image_base + 0x1442BC8, [this](cpu_interface&, const uint64_t) {
+                        this->log.print(color::pink, "[VERDICT] filter entered: pointers=0x%" PRIx64 " frame=0x%" PRIx64 "\n",
+                                        this->emu().reg<uint64_t>(x86_register::rcx), this->emu().reg<uint64_t>(x86_register::rdx));
+                    });
+
+                    this->emu().hook_memory_execution(mod.image_base + 0x8DB897, [this](cpu_interface&, const uint64_t) {
+                        const auto rbp = this->emu().reg<uint64_t>(x86_register::rbp);
+                        uint64_t verdict = 0;
+                        const bool ok = this->memory.try_read_memory(rbp - 8, &verdict, sizeof(verdict));
+                        this->log.print(color::pink, "[VERDICT] tripwire returns 0x%" PRIx64 "%s (rbp=0x%" PRIx64 ")\n", verdict,
+                                        ok ? "" : " <unreadable>", rbp);
+                    });
+                }
+
                 // SOGEN_C0210_BP=1 -- every site in runtime.dll that loads the immediate
                 // 0xC0000210, the "Internal error #4" the dumper dies with. No syscall
                 // returns that status, so it is Theia's own check; several of these are
                 // preceded by `mov eax,[rbx]; and eax,3`, a state word masked to two bits.
                 // Whichever fires names the failing check and rbx is the state object.
+                // SOGEN_HR_BP=1 -- Theia has no literal 0x8007001F; it builds the dump error as
+                // HRESULT_FROM_WIN32(GetLastError()), and 12 sites load the 0x80070000 base (7 in
+                // plaintext packer1). No syscall in the run returns a status that maps to
+                // ERROR_GEN_FAILURE (31) any more, so the error is set somewhere we cannot see
+                // from statuses. Whichever of these fires is where the code is assembled.
+                if (getenv("SOGEN_HR_BP"))
+                {
+                    static constexpr uint64_t hr_sites[] = {
+                        0x882CBE, 0x95F8AB, 0x95FBFC, 0x95FD01, 0x966BBB, 0x969ADE, 0x969B01,
+                    };
+
+                    for (const auto rva : hr_sites)
+                    {
+                        this->emu().hook_memory_execution(
+                            mod.image_base + rva, [this, rva](cpu_interface&, const uint64_t) {
+                                this->log.print(color::pink,
+                                                "[HR] site +0x%" PRIx64 " rax=0x%" PRIx64 " rcx=0x%" PRIx64
+                                                " rdx=0x%" PRIx64 " r8=0x%" PRIx64 "\n",
+                                                rva, this->emu().reg<uint64_t>(x86_register::rax),
+                                                this->emu().reg<uint64_t>(x86_register::rcx),
+                                                this->emu().reg<uint64_t>(x86_register::rdx),
+                                                this->emu().reg<uint64_t>(x86_register::r8));
+                            });
+                    }
+                    this->log.info("[HR] armed %zu sites\n", std::size(hr_sites));
+                }
+
                 if (getenv("SOGEN_C0210_BP"))
                 {
                     static constexpr uint64_t c0210_sites[] = {

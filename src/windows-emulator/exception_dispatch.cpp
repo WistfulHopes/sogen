@@ -309,6 +309,54 @@ namespace sogen
 
     void dispatch_access_violation(windows_emulator& win_emu, vcpu_context& vcpu, const uint64_t address, const memory_operation operation)
     {
+        // An execute fault means control was transferred somewhere non-executable, so the
+        // interesting question is who transferred it -- and Theia's control-flow flattening
+        // leaves no call frames to walk. Dumping the registers and the top of the stack at the
+        // moment of the fault is the only place that information still exists: a flattened
+        // dispatch computes its target into a register, so the bad value is usually still
+        // there, and the stack top holds whatever the last real call pushed.
+        if (operation == memory_operation::exec)
+        {
+            const auto* mod = win_emu.mod_manager.find_by_address(address);
+            const auto rsp = vcpu.cpu.reg<uint64_t>(x86_register::rsp);
+
+            win_emu.log.print(color::pink, "[XFAULT] execute at 0x%" PRIx64 " (%s+0x%" PRIx64 ") rsp=0x%" PRIx64 "\n", address,
+                              mod ? mod->name.c_str() : "<unmapped>", mod ? address - mod->image_base : 0, rsp);
+
+            static constexpr std::pair<x86_register, const char*> regs[] = {
+                {x86_register::rax, "rax"}, {x86_register::rcx, "rcx"}, {x86_register::rdx, "rdx"},
+                {x86_register::rbx, "rbx"}, {x86_register::rsi, "rsi"}, {x86_register::rdi, "rdi"},
+                {x86_register::r8, "r8"},   {x86_register::r9, "r9"},   {x86_register::r10, "r10"},
+                {x86_register::r11, "r11"}, {x86_register::r12, "r12"}, {x86_register::r13, "r13"},
+                {x86_register::r14, "r14"}, {x86_register::r15, "r15"},
+            };
+            for (const auto& [reg, name] : regs)
+            {
+                const auto v = vcpu.cpu.reg<uint64_t>(reg);
+                const auto* rm = win_emu.mod_manager.find_by_address(v);
+                if (rm)
+                {
+                    win_emu.log.print(color::pink, "[XFAULT]   %-3s = 0x%" PRIx64 "  (%s+0x%" PRIx64 ")\n", name, v,
+                                      rm->name.c_str(), v - rm->image_base);
+                }
+            }
+
+            for (int i = 0; i < 8; ++i)
+            {
+                uint64_t v = 0;
+                if (!win_emu.memory.try_read_memory(rsp + i * 8, &v, sizeof(v)))
+                {
+                    break;
+                }
+                const auto* sm = win_emu.mod_manager.find_by_address(v);
+                if (sm)
+                {
+                    win_emu.log.print(color::pink, "[XFAULT]   [rsp+0x%02X] = 0x%" PRIx64 "  (%s+0x%" PRIx64 ")\n", i * 8, v,
+                                      sm->name.c_str(), v - sm->image_base);
+                }
+            }
+        }
+
         dispatch_exception(win_emu, vcpu, STATUS_ACCESS_VIOLATION,
                            {
                                map_violation_operation_to_parameter(operation),
