@@ -384,6 +384,17 @@ namespace sogen
                     entry.creation_time = get_file_time(deterministic_time, file_stat.st_ctimespec);
                     entry.last_access_time = get_file_time(deterministic_time, file_stat.st_atimespec);
                     entry.last_write_time = get_file_time(deterministic_time, file_stat.st_mtimespec);
+
+                    // AllocationSize is the space actually reserved on disk, so it is the file size
+                    // rounded up to a cluster and is never zero for a non-empty file. Leaving it zero
+                    // is visibly wrong to anything that inspects it.
+                    constexpr uint64_t cluster_size = 4096;
+                    entry.allocation_size = is_directory ? 0 : align_up(entry.file_size, cluster_size);
+
+                    // The ID-bearing information classes exist to hand back a value that is unique
+                    // per file on a volume; returning zero for every entry makes them useless to any
+                    // caller that keys on it. The host inode is the natural source.
+                    entry.file_id = file_stat.st_ino;
                 }
 
                 return entry;
@@ -500,6 +511,14 @@ namespace sogen
                 info.FileAttributes = current_file.is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
                 info.FileNameLength = static_cast<ULONG>(file_name.size() * 2);
                 info.EndOfFile.QuadPart = current_file.file_size;
+                info.AllocationSize.QuadPart = static_cast<int64_t>(current_file.allocation_size);
+
+                // Only the FileId* classes carry an identifier, and Theia asks for class 38
+                // (FileIdFullDirectoryInformation) precisely to get one.
+                if constexpr (requires { info.FileId; })
+                {
+                    info.FileId.QuadPart = static_cast<int64_t>(current_file.file_id);
+                }
 
                 object.set_address(file_information + new_offset);
                 object.write(info);
