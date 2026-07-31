@@ -33,6 +33,16 @@ namespace sogen
             nt_protection &= ~static_cast<uint32_t>(PAGE_GUARD);
             ext = memory_permission_ext::guard;
         }
+        if (nt_protection & PAGE_NOCACHE)
+        {
+            // Unset the no cache flag so the following switch statement will still work
+            nt_protection &= ~static_cast<uint32_t>(PAGE_NOCACHE);
+        }
+        if (nt_protection & PAGE_WRITECOMBINE)
+        {
+            // Unset the write combine flag so the following switch statement will still work
+            nt_protection &= ~static_cast<uint32_t>(PAGE_WRITECOMBINE);
+        }
 
         // Remove the highest nibble since we are not currently handling those memory protection constants
         // https://github.com/winsiderss/phnt/blob/master/ntmmapi.h#L26
