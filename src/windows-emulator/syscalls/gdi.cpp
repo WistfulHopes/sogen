@@ -448,7 +448,12 @@ namespace sogen
                 }
 
                 const uint64_t user_ptr = (type == k_gdi_font_type) ? 0 : attr;
-                return allocate_gdi_handle(c, type, user_ptr, attr);
+                const auto handle_value = allocate_gdi_handle(c, type, user_ptr, attr);
+                if (handle_value == 0)
+                {
+                    c.win_emu.memory.release_memory(attr, 0);
+                }
+                return handle_value;
             }
 
             bool get_gdi_object_address(const syscall_context& c, const uint32_t handle_value, const uint8_t expected_type, uint64_t& addr)
@@ -1249,6 +1254,11 @@ namespace sogen
                 {
                     c.proc.gdi_dc_states[handle_value] = {};
                 }
+                else
+                {
+                    c.win_emu.memory.release_memory(dc_attr, 0);
+                    dc_attr = 0;
+                }
                 return handle_value;
             }
 
@@ -1993,6 +2003,80 @@ namespace sogen
             return handle_value;
         }
 
+        int32_t handle_NtGdiGetBitmapBits(const syscall_context& c, const handle bitmap, const int32_t count, const emulator_pointer bits)
+        {
+            const auto it = c.proc.gdi_bitmap_surfaces.find(static_cast<uint32_t>(bitmap.bits));
+
+            if (it == c.proc.gdi_bitmap_surfaces.end())
+            {
+                return 0;
+            }
+
+            auto& surface = it->second;
+            sync_surface_from_guest_dib(c, surface);
+
+            const uint32_t bpp = surface.guest_bits != 0 ? surface.guest_bpp : 32;
+
+            if (bpp != 24 && bpp != 32)
+            {
+                c.win_emu.log.warn("NtGdiGetBitmapBits: Unsupported bitmap bit depth: %u bpp", bpp);
+                return 0;
+            }
+
+            // GetBitmapBits scanlines are aligned to 16-bit boundaries.
+            const size_t stride = ((static_cast<size_t>(surface.width) * bpp + 15) / 16) * 2;
+
+            const size_t total_size = stride * surface.height;
+
+            if (total_size > static_cast<size_t>((std::numeric_limits<int32_t>::max)()))
+            {
+                return 0;
+            }
+
+            // A null output buffer is a size query.
+            if (bits == 0)
+            {
+                return static_cast<int32_t>(total_size);
+            }
+
+            const size_t copy_size = count < 0 ? total_size : std::min(static_cast<size_t>(count), total_size);
+
+            if (copy_size == 0)
+            {
+                return 0;
+            }
+
+            std::vector<uint8_t> output(total_size, 0);
+
+            for (uint32_t y = 0; y < surface.height; ++y)
+            {
+                const uint32_t source_y = surface.guest_top_down ? y : surface.height - 1 - y;
+
+                const auto* source = surface.pixels.data() + static_cast<size_t>(source_y) * surface.width;
+
+                auto* destination = output.data() + static_cast<size_t>(y) * stride;
+
+                if (bpp == 32)
+                {
+                    std::memcpy(destination, source, static_cast<size_t>(surface.width) * sizeof(uint32_t));
+                }
+                else
+                {
+                    for (uint32_t x = 0; x < surface.width; ++x)
+                    {
+                        const uint32_t pixel = source[x];
+
+                        destination[x * 3 + 0] = static_cast<uint8_t>(pixel);
+                        destination[x * 3 + 1] = static_cast<uint8_t>(pixel >> 8);
+                        destination[x * 3 + 2] = static_cast<uint8_t>(pixel >> 16);
+                    }
+                }
+            }
+
+            c.emu.write_memory(bits, output.data(), copy_size);
+            return static_cast<int32_t>(copy_size);
+        }
+
         uint64_t handle_NtGdiCreateDIBSection(const syscall_context& c, const hdc /*dc*/, const uint64_t /*section_app*/,
                                               const uint32_t /*offset*/, const emulator_pointer info, const uint32_t /*usage*/,
                                               const uint32_t header_size, const uint32_t /*flags*/, const uint64_t /*color_space*/,
@@ -2406,6 +2490,10 @@ namespace sogen
             {
                 c.win_emu.memory.release_memory(bmp_it->second.guest_bits, 0);
             }
+            if (entry.Object != 0)
+            {
+                c.win_emu.memory.release_memory(entry.Object, 0);
+            }
 
             c.proc.gdi_dc_states.erase(handle_value);
             c.proc.gdi_bitmap_surfaces.erase(handle_value);
@@ -2605,8 +2693,9 @@ namespace sogen
                                .italic = true,
                                .supports_arabic_and_hebrew = false},
                 };
-                constexpr std::array<std::pair<BYTE, std::u16string_view>, 9> scripts{
+                constexpr std::array<std::pair<BYTE, std::u16string_view>, 10> scripts{
                     std::pair{static_cast<BYTE>(ANSI_CHARSET), u"Western"sv},
+                    std::pair{static_cast<BYTE>(SHIFTJIS_CHARSET), u"Japanese"sv},
                     std::pair{static_cast<BYTE>(HEBREW_CHARSET), u"Hebrew"sv},
                     std::pair{static_cast<BYTE>(ARABIC_CHARSET), u"Arabic"sv},
                     std::pair{static_cast<BYTE>(GREEK_CHARSET), u"Greek"sv},
@@ -2768,7 +2857,13 @@ namespace sogen
             return required;
         }
 
-        BOOL handle_NtGdiGetTextExtent(const syscall_context& c, const hdc dc, const emulator_pointer text, const int32_t char_count,
+        uint32_t handle_NtGdiGetKerningPairs(const syscall_context&, const hdc /*dc*/, const uint32_t /*pair_count*/,
+                                             const emulator_pointer /*pairs*/)
+        {
+            return 0;
+        }
+
+        BOOL handle_NtGdiGetTextExtent(const syscall_context& c, const hdc dc, const emulator_pointer /*text*/, const int32_t char_count,
                                        const emulator_pointer size, const ULONG /*flags*/)
         {
             // DIAGNOSTIC: the emulated game lays out a #32770 message box just before it

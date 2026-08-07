@@ -1183,7 +1183,8 @@ namespace
 
     bool test_message_queue()
     {
-        static thread_local UINT wnd_proc_num = 0;
+        thread_local UINT wnd_proc_num = 0;
+        thread_local UINT destroy_count = 0;
         static const UINT wnd_msg_id = WM_APP + 2;
 
         WNDCLASSEXA wc = {};
@@ -1207,6 +1208,19 @@ namespace
                     return 777;
                 }
             }
+            else if (msg == WM_CLOSE)
+            {
+                wnd_proc_num += 1;
+                if (wnd_proc_num == 2)
+                {
+                    return 0;
+                }
+            }
+            else if (msg == WM_DESTROY)
+            {
+                ++destroy_count;
+                PostQuitMessage(42);
+            }
             return DefWindowProcA(hwnd, msg, wp, lp);
         };
 
@@ -1216,22 +1230,23 @@ namespace
             return false;
         }
 
+        const auto unregister_class = sogen::utils::finally([&] { UnregisterClassA(wc.lpszClassName, wc.hInstance); });
+
         HWND hwnd = CreateWindowExA(0, wc.lpszClassName, nullptr, 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance,
                                     reinterpret_cast<void*>(0x1337));
         if (!hwnd || wnd_proc_num != 1)
         {
             puts("Failed to create message window");
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
+
+        const auto destroy_window = sogen::utils::finally([&] { DestroyWindow(hwnd); });
 
         const LRESULT send_res = SendMessageA(hwnd, wnd_msg_id, 123, 456);
 
         if (send_res != 777 || wnd_proc_num != 2)
         {
             puts("SendMessage failed");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
@@ -1239,8 +1254,6 @@ namespace
         if (!PostMessageA(hwnd, wnd_msg_id, 123, 456))
         {
             puts("PostMessage failed");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
@@ -1248,16 +1261,12 @@ namespace
         if (GetMessageA(&msg, hwnd, 0, 0) <= 0)
         {
             puts("GetMessage failed or returned WM_QUIT unexpectedly");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
         if (msg.message != wnd_msg_id)
         {
             puts("Retrieved message is not the expected custom message");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
@@ -1267,51 +1276,89 @@ namespace
         if (wnd_proc_num != 1)
         {
             puts("Posted window message did not execute WndProc");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
-        constexpr int quit_code = 42;
-        PostQuitMessage(quit_code);
+        SendMessageA(hwnd, WM_CLOSE, 0, 0);
+        if (!IsWindow(hwnd) || destroy_count != 0)
+        {
+            puts("WndProc unexpectedly destroyed the window on cancelled WM_CLOSE");
+            return false;
+        }
+
+        SendMessageA(hwnd, WM_CLOSE, 0, 0);
+        if (IsWindow(hwnd) || destroy_count != 1)
+        {
+            puts("DefWindowProc did not destroy the window on WM_CLOSE");
+            return false;
+        }
+        hwnd = nullptr;
 
         const BOOL quit_result = GetMessageA(&msg, nullptr, 0, 0);
         if (quit_result != 0)
         {
             puts("GetMessage did not return 0 for WM_QUIT");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
         if (msg.message != WM_QUIT)
         {
             puts("Message is not WM_QUIT");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
-        if (msg.wParam != quit_code)
+        if (msg.wParam != 42)
         {
             puts("WM_QUIT exit code mismatch");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
-        DestroyWindow(hwnd);
-        UnregisterClassA(wc.lpszClassName, wc.hInstance);
         return true;
     }
 
     bool test_paint_message_queue()
     {
+        struct paint_state
+        {
+            HWND window{};
+            int ncpaint{};
+            int erase{};
+            int paint{};
+        };
+
+        thread_local paint_state* active_paint_state{};
+
         WNDCLASSEXA wc = {};
         wc.cbSize = sizeof(wc);
         wc.lpszClassName = "TestPaintMsgQueueClass";
         wc.hInstance = GetModuleHandleA(nullptr);
-        wc.lpfnWndProc = DefWindowProcA;
+        wc.lpfnWndProc = [](const HWND hwnd, const UINT message, const WPARAM w_param, const LPARAM l_param) -> LRESULT {
+            if (active_paint_state && hwnd == active_paint_state->window)
+            {
+                if (message == WM_NCPAINT)
+                {
+                    ++active_paint_state->ncpaint;
+                }
+                else if (message == WM_ERASEBKGND)
+                {
+                    ++active_paint_state->erase;
+                    RECT client_rect{};
+                    GetClientRect(hwnd, &client_rect);
+                    FillRect(reinterpret_cast<HDC>(w_param), &client_rect, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+                    return TRUE;
+                }
+                else if (message == WM_PAINT)
+                {
+                    ++active_paint_state->paint;
+                    PAINTSTRUCT paint{};
+                    BeginPaint(hwnd, &paint);
+                    EndPaint(hwnd, &paint);
+                    return 0;
+                }
+            }
+
+            return DefWindowProcA(hwnd, message, w_param, l_param);
+        };
 
         if (!RegisterClassExA(&wc))
         {
@@ -1321,8 +1368,8 @@ namespace
 
         const auto unregister_class = sogen::utils::finally([&] { UnregisterClassA(wc.lpszClassName, wc.hInstance); });
 
-        const HWND hwnd = CreateWindowExA(0, wc.lpszClassName, nullptr, WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 100, 100, nullptr, nullptr,
-                                          wc.hInstance, nullptr);
+        const HWND hwnd =
+            CreateWindowExA(0, wc.lpszClassName, nullptr, WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, nullptr, nullptr, wc.hInstance, nullptr);
         if (!hwnd)
         {
             puts("Failed to create paint window");
@@ -1331,7 +1378,29 @@ namespace
 
         const auto destroy_window = sogen::utils::finally([&] { DestroyWindow(hwnd); });
 
-        UpdateWindow(hwnd);
+        paint_state state{.window = hwnd};
+        active_paint_state = &state;
+        const auto clear_paint_state = sogen::utils::finally([&] { active_paint_state = nullptr; });
+
+        ShowWindow(hwnd, SW_SHOWDEFAULT);
+
+        RECT update_rect{};
+        if (state.ncpaint != 1 || state.erase != 1)
+        {
+            puts("ShowWindow did not synthesize nonclient and background paint");
+            return false;
+        }
+        if (state.paint != 0 || !GetUpdateRect(hwnd, &update_rect, FALSE))
+        {
+            puts("ShowWindow background paint unexpectedly validated the window");
+            return false;
+        }
+        if (!UpdateWindow(hwnd) || state.paint != 1 || GetUpdateRect(hwnd, &update_rect, FALSE))
+        {
+            puts("UpdateWindow did not paint and validate the window after ShowWindow");
+            return false;
+        }
+
         RedrawWindow(hwnd, nullptr, nullptr, RDW_NOINTERNALPAINT | RDW_VALIDATE);
         ValidateRect(hwnd, nullptr);
 
@@ -1375,6 +1444,7 @@ namespace
         }
 
         ValidateRect(hwnd, nullptr);
+
         return true;
     }
 
